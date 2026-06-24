@@ -81,7 +81,7 @@ end
 -- Tri-state per-book toggle:
 --   explicit true  -> always on
 --   explicit false -> always off (user opted out)
---   nil (never touched) -> AUTO: on iff <book>.sdr/rosetta-aligned.json exists
+--   nil (never touched) -> AUTO: on iff <book>.sdr/parallel-aligned.json exists
 function rosetta:isEnabledForBook()
     local key = self:getBookKey()
     if not key then return false end

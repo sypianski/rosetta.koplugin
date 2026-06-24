@@ -1,4 +1,4 @@
-# Rosetta Anchor File Format (`rosetta-aligned.json`)
+# Rosetta Anchor File Format (`parallel-aligned.json`)
 
 The anchor file follows the **[epub-parallel-align](https://github.com/sypianski/epub-parallel-align)** open specification — a content-hash-keyed sidecar format for bilingual EPUB paragraph alignment.
 
@@ -7,14 +7,14 @@ This document is Rosetta's implementation notes on top of that spec.  For the ca
 The anchor file is produced by [paraligilo](https://github.com/sypianski/paraligilo) and consumed by Rosetta at read-time.  It lives in the book's KOReader sidecar:
 
 ```
-<book.epub>.sdr/rosetta-aligned.json
+<book.epub>.sdr/parallel-aligned.json
 ```
 
 ## Schema (version 1)
 
 ```json
 {
-  "rosetta_align_version": 1,
+  "epa_version": 1,
   "src":  { "file": "il-libro.epub",       "lang": "it" },
   "tgt":  { "file": "ksiazka-pl.epub",     "lang": "pl" },
   "method": "gale-church" | "embeddings" | "llm" | "hybrid",
@@ -66,6 +66,6 @@ When the translator split one source paragraph into two targets, the entry store
 
 ## File location
 
-Rosetta loads `rosetta-aligned.json` from the same `.sdr/` directory KOReader already uses for bookmarks, highlights, and reading state.  If you sync your `.sdr/` directories via Syncthing (recommended), anchor files travel with the book across devices.
+Rosetta loads `parallel-aligned.json` from the same `.sdr/` directory KOReader already uses for bookmarks, highlights, and reading state.  If you sync your `.sdr/` directories via Syncthing (recommended), anchor files travel with the book across devices.
 
 If the file is missing or fails to parse, Rosetta silently falls back to its AI translation pipeline — no error UI.

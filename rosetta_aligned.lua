@@ -1,5 +1,5 @@
 -- Loads and queries a paraligilo-produced anchor file
--- (`<book>.sdr/rosetta-aligned.json`).  See ANCHOR_FORMAT.md for the schema.
+-- (`<book>.sdr/parallel-aligned.json`).  See ANCHOR_FORMAT.md for the schema.
 --
 -- Used by main.lua before falling back to the AI translation pipeline: when an
 -- anchor exists for a given source paragraph (matched by content hash), the
@@ -75,8 +75,8 @@ function Aligned:_pathsFor(book_file)
     --   2. "<book_basename>.sdr" (strip the final extension first — classic layout)
     -- Yield both so callers can probe either.
     if not book_file then return {} end
-    local with_ext = book_file .. ".sdr/rosetta-aligned.json"
-    local stripped = book_file:gsub("%.[^./]+$", "") .. ".sdr/rosetta-aligned.json"
+    local with_ext = book_file .. ".sdr/parallel-aligned.json"
+    local stripped = book_file:gsub("%.[^./]+$", "") .. ".sdr/parallel-aligned.json"
     if stripped == with_ext then return { with_ext } end
     return { with_ext, stripped }
 end
@@ -124,8 +124,8 @@ function Aligned:loadForBook(book_file)
         self._cache[book_file] = false
         return nil
     end
-    if parsed.rosetta_align_version ~= 1 then
-        logger.info("rosetta_aligned: unsupported version", tostring(parsed.rosetta_align_version))
+    if parsed.epa_version ~= 1 then
+        logger.info("rosetta_aligned: unsupported version", tostring(parsed.epa_version))
         self._cache[book_file] = false
         return nil
     end
@@ -179,12 +179,28 @@ function Aligned:lookupBlock(book_file, block_text, min_confidence, miss_marker)
     local doc = self:loadForBook(book_file)
     if not doc then return nil, 0, 0 end
 
+    local dbg = io.open("/tmp/rosetta-debug.log", "a")
+    if dbg then dbg:write("\n==== PAGE LOOKUP min_conf=" .. tostring(min_confidence) .. " ====\n") end
+
     local out, hits, misses = {}, 0, 0
     local last_tgt = nil  -- de-dup consecutive identical translations
                           -- (one tgt paragraph mapped from multiple src ones)
     for paragraph in (block_text .. "\n\n"):gmatch("(.-)\n\n") do
         if paragraph ~= "" then
             local tgt = self:lookupParagraph(book_file, paragraph, min_confidence)
+            if dbg then
+                local nm = normalize(paragraph)
+                local ok_h, hh = pcall(sha2.md5, nm)
+                local in_db = (ok_h and hh and doc.by_hash[hh]) and "INDB" or "NODB"
+                local conf = ""
+                if ok_h and hh and doc.by_hash[hh] then
+                    conf = " conf=" .. tostring(doc.by_hash[hh].confidence)
+                end
+                dbg:write("  [" .. (tgt and "HIT" or "MISS") .. "/" .. in_db .. conf .. "] "
+                          .. (ok_h and hh and hh:sub(1,8) or "????????")
+                          .. " :: " .. paragraph:sub(1,140):gsub("\n","\\n") .. "\n")
+                dbg:write("    norm: " .. nm:sub(1,200) .. "\n")
+            end
             if tgt then
                 if tgt ~= last_tgt then
                     table.insert(out, tgt)
@@ -202,6 +218,7 @@ function Aligned:lookupBlock(book_file, block_text, min_confidence, miss_marker)
             end
         end
     end
+    if dbg then dbg:write("hits=" .. hits .. " misses=" .. misses .. "\n"); dbg:close() end
     return table.concat(out, "\n\n"), hits, misses
 end
 

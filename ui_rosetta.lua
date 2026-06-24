@@ -394,7 +394,7 @@ function UI:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
             local Aligned = require("rosetta_aligned")
             -- Return whichever convention actually has the file; fall back to
             -- the with-extension form for messaging when neither exists.
-            return Aligned:_existingPathFor(f) or (f .. ".sdr/rosetta-aligned.json")
+            return Aligned:_existingPathFor(f) or (f .. ".sdr/parallel-aligned.json")
         end
         local function file_exists(p)
             local fh = p and io.open(p, "rb"); if not fh then return false end
@@ -422,16 +422,16 @@ function UI:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
                 -- Try both <file>.sdr and <file-without-ext>.sdr conventions.
                 local sdr_with_ext = orig .. ".sdr"
                 local sdr_stripped = orig:gsub("%.[^./]+$", "") .. ".sdr"
-                local sdr = file_exists(sdr_stripped .. "/rosetta-aligned.json")
+                local sdr = file_exists(sdr_stripped .. "/parallel-aligned.json")
                           and sdr_stripped or sdr_with_ext
                 local notes = {}
 
                 -- 1. anchor JSON / Lua already in .sdr/
                 local anchor_candidates = {
-                    sdr_with_ext .. "/rosetta-aligned.json",
-                    sdr_with_ext .. "/rosetta-aligned.lua",
-                    sdr_stripped .. "/rosetta-aligned.json",
-                    sdr_stripped .. "/rosetta-aligned.lua",
+                    sdr_with_ext .. "/parallel-aligned.json",
+                    sdr_with_ext .. "/parallel-aligned.lua",
+                    sdr_stripped .. "/parallel-aligned.json",
+                    sdr_stripped .. "/parallel-aligned.lua",
                 }
                 local anchor_found
                 for _, p in ipairs(anchor_candidates) do
@@ -556,7 +556,7 @@ function UI:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
                 elseif file_exists(p) then
                     msg = "Anchor file found:\n" .. p
                 else
-                    msg = "No anchor file at:\n" .. p .. "\n\nPaths searched:\n  • <book>.sdr/rosetta-aligned.json"
+                    msg = "No anchor file at:\n" .. p .. "\n\nPaths searched:\n  • <book>.sdr/parallel-aligned.json"
                 end
                 UIManager:close(dialog)
                 UIManager:show(InfoMessage:new{ text = msg })
@@ -576,7 +576,7 @@ function UI:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
                 local start_dir = book_file():match("^(.*)/[^/]+$") or "/"
                 local chooser
                 chooser = PathChooser:new{
-                    title = "Pick rosetta-aligned.json",
+                    title = "Pick parallel-aligned.json",
                     path = start_dir,
                     select_directory = false,
                     select_file = true,
@@ -638,7 +638,7 @@ function UI:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
                     slug = slug:gsub("[^%w]+", "_")
                     local workdir = "/tmp/rosetta-paraligilo-" .. slug
                     os.execute(string.format("mkdir -p %q", workdir))
-                    local out_json = orig .. ".sdr/rosetta-aligned.json"
+                    local out_json = orig .. ".sdr/parallel-aligned.json"
                     os.execute(string.format("mkdir -p %q", orig .. ".sdr"))
 
                     local Trapper = require("ui/trapper")
