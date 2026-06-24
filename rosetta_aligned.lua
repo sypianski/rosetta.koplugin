@@ -129,7 +129,7 @@ function Aligned:loadForBook(book_file)
         self._cache[book_file] = false
         return nil
     end
-    if parsed.epa_version ~= 1 then
+    if parsed.epa_version ~= 1 and parsed.epa_version ~= 2 then
         logger.info("rosetta_aligned: unsupported version", tostring(parsed.epa_version))
         self._cache[book_file] = false
         return nil
@@ -225,6 +225,49 @@ function Aligned:lookupBlock(book_file, block_text, min_confidence, miss_marker)
     end
     if dbg then dbg:write("hits=" .. hits .. " misses=" .. misses .. "\n"); dbg:close() end
     return table.concat(out, "\n\n"), hits, misses
+end
+
+-- ---------------------------------------------------------------------------
+-- For AI fallback: given the positions of the few paragraphs we did manage
+-- to hash-match on the current page, return a window of nearby paragraph
+-- entries from the ordered list. Each entry has src + tgt so the AI can use
+-- it as a bilingual corpus for the misses on the page.
+-- ---------------------------------------------------------------------------
+function Aligned:nearbyContext(book_file, hit_positions, window)
+    local doc = self:loadForBook(book_file)
+    if not doc or not doc.paragraphs then return nil end
+    window = window or 8
+    local lo, hi
+    if hit_positions and #hit_positions > 0 then
+        lo = hit_positions[1]; hi = hit_positions[1]
+        for _, p in ipairs(hit_positions) do
+            if p < lo then lo = p end
+            if p > hi then hi = p end
+        end
+        lo = math.max(1, lo - window)
+        hi = math.min(#doc.paragraphs, hi + window)
+    else
+        -- no hits — caller has no position; bail
+        return nil
+    end
+    local out = {}
+    for i = lo, hi do
+        local p = doc.paragraphs[i]
+        if p then table.insert(out, { src = p.src, tgt = p.tgt }) end
+    end
+    return out
+end
+
+function Aligned:posForParagraph(book_file, src_text)
+    local doc = self:loadForBook(book_file)
+    if not doc then return nil end
+    local norm = normalize(src_text)
+    if norm == "" then return nil end
+    local ok, hash = pcall(sha2.md5, norm)
+    if not ok or not hash then return nil end
+    local entry = doc.by_hash[hash]
+    if not entry then return nil end
+    return entry.pos
 end
 
 -- Exposed for tests / paraligilo cross-reference

@@ -292,4 +292,116 @@ function AI:_parsePipeMarker(text)
     return joined, is_continuation
 end
 
+-- ---------------------------------------------------------------------------
+-- AI:matchAligned — hybrid aligned-mode helper.
+--
+-- Given the source paragraphs on the current page (in order) and a bilingual
+-- corpus snippet from the nearby region of the book, ask the model to emit
+-- the target-language equivalent of each numbered source paragraph.
+--
+-- The corpus is the AI's grounding: when content matches an entry it reuses
+-- the human translation verbatim; when no entry matches it falls back to its
+-- own translation. This lets us serve human translations for the bulk of the
+-- page and AI-translate only the residual paragraphs that hash-lookup missed.
+--
+-- on_result(map, err) — map is { [i] = "target text", ... } keyed by the
+-- 1-based index of the source paragraph as it appeared in `src_paragraphs`.
+-- ---------------------------------------------------------------------------
+local MATCH_SYSTEM_PROMPT = [[
+You are a bilingual page-boundary locator.
+
+You receive:
+  - SOURCE PAGE: the source-language paragraphs that are physically on the current page of the book.
+  - TRANSLATION CORPUS: numbered target-language paragraphs from the same book covering the nearby region.
+
+Find which TRANSLATION CORPUS paragraph corresponds to the FIRST source paragraph and which corresponds to the LAST source paragraph on the page.
+
+Constraints:
+  - You do NOT translate anything. You only select two integers.
+  - The two integers must be within the numbered range of the corpus.
+  - first <= last.
+  - If multiple corpus paragraphs cover one source paragraph, pick the widest contiguous range.
+  - If no corpus entry plausibly matches a source paragraph at the page edge, still pick the closest paragraph by position; never refuse to answer.
+
+Output ONLY a single JSON object: {"first": N, "last": M}. No prose before or after.
+]]
+
+-- Returns on_result({first=N, last=M}, err) — 1-based corpus indices.
+function AI:matchAligned(config, src_paragraphs, corpus, target_lang, on_result, silent)
+    if not self:isConfigured(config) then
+        on_result(nil, "No AI API key configured.")
+        return
+    end
+    if not src_paragraphs or #src_paragraphs == 0 or not corpus or #corpus == 0 then
+        on_result(nil); return
+    end
+    -- Build user prompt.
+    local parts = {}
+    table.insert(parts, "SOURCE PAGE (paragraphs in order):")
+    for i, p in ipairs(src_paragraphs) do
+        table.insert(parts, string.format("%d) %s", i, p))
+    end
+    table.insert(parts, "")
+    table.insert(parts, "TRANSLATION CORPUS (numbered " ..
+        tostring(target_lang or "??") .. " paragraphs):")
+    for j, entry in ipairs(corpus) do
+        table.insert(parts, string.format("[%d] %s", j, entry.tgt or ""))
+    end
+    table.insert(parts, "")
+    table.insert(parts,
+        "Select the corpus indices for the FIRST and LAST source paragraph.")
+    table.insert(parts, "Output ONLY: {\"first\": N, \"last\": M}")
+    local user_prompt = table.concat(parts, "\n")
+
+    local url = config.ai_base_url or "https://openrouter.ai/api/v1/chat/completions"
+    local model = config.ai_model or "google/gemini-2.5-flash"
+    local key = config.ai_api_key
+    local payload = {
+        model = model,
+        messages = {
+            { role = "system", content = MATCH_SYSTEM_PROMPT },
+            { role = "user",   content = user_prompt },
+        },
+        temperature = 0.1,
+        max_tokens = config.ai_max_tokens or 4096,
+        response_format = { type = "json_object" },
+    }
+    local payload_str = rapidjson.encode(payload)
+
+    local function run()
+        local ok, code, body = pcall(do_request, url, key, payload_str)
+        if not ok then on_result(nil, "Network error: " .. tostring(code)); return end
+        if not code or code ~= 200 then
+            on_result(nil, "HTTP " .. tostring(code) .. ": " .. tostring(body):sub(1, 200))
+            return
+        end
+        local pok, parsed = pcall(rapidjson.decode, body, { null = nil })
+        if not pok or not parsed then on_result(nil, "Invalid JSON response"); return end
+        if parsed.error then
+            on_result(nil, "API error: " .. tostring(parsed.error.message or parsed.error)); return
+        end
+        local choice = parsed.choices and parsed.choices[1]
+        local text = choice and choice.message and choice.message.content
+        if not text or text == "" then on_result(nil, "Empty response"); return end
+        -- Strip code fences just in case.
+        text = text:gsub("^%s*```%w*%s*", ""):gsub("%s*```%s*$", "")
+        local mok, mapped = pcall(rapidjson.decode, text, { null = nil })
+        if not mok or type(mapped) ~= "table" then
+            on_result(nil, "Bad JSON from model: " .. text:sub(1, 200)); return
+        end
+        local first = tonumber(mapped.first or mapped["1"])
+        local last  = tonumber(mapped.last  or mapped["2"])
+        if not first or not last or first > last then
+            on_result(nil, "Invalid range from model: " .. text:sub(1, 200)); return
+        end
+        on_result({ first = first, last = last })
+    end
+
+    if silent then
+        NetworkMgr:runWhenOnline(run)
+    else
+        NetworkMgr:runWhenOnline(function() Trapper:wrap(run) end)
+    end
+end
+
 return AI

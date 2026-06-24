@@ -290,6 +290,16 @@ function UI:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
                 Config:save(config); UIManager:close(dialog); reopen()
             end,
         }
+        -- Only meaningful when backend = aligned. Toggles whether the plugin
+        -- falls back to AI for paragraphs that miss the hash lookup.
+        local btn_aligned_ai = {
+            text = "EPUB AI fill-in: " ..
+                ((config.aligned_ai_fallback ~= false) and "ON" or "OFF"),
+            callback = function()
+                config.aligned_ai_fallback = not (config.aligned_ai_fallback ~= false)
+                Config:save(config); UIManager:close(dialog); reopen()
+            end,
+        }
         local btn_auto = {
             text = "Auto-translate: " .. (config.auto_translate and "ON" or "OFF"),
             callback = function()
@@ -730,7 +740,7 @@ function UI:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
                 hdr_alignment,
                 { btn_anchor_status,  btn_auto_detect     },
                 { btn_set_anchor,     btn_pair_epub       },
-                { btn_run_paraligilo, empty               },
+                { btn_aligned_ai,     btn_run_paraligilo  },
                 hdr_formatting,
                 { btn_font,           btn_font_size       },
                 { btn_line_spacing,   btn_indent          },

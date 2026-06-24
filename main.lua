@@ -362,17 +362,93 @@ function rosetta:translateCurrentPageAligned(page, current)
         self.panel_text = "No book open."
         self:refreshPanel(); return
     end
-    -- Pure aligned-only flow: drop missing paragraphs entirely (no source
-    -- echo, no marker, no footer). The panel shows only what is actually
-    -- translated. Empty / front-matter pages just render blank.
-    local aligned, hits, _misses = Aligned:lookupBlock(book_file, current,
-        self.config.anchor_min_confidence, "")
-    if aligned and hits > 0 then
-        self.panel_text = aligned
-    else
-        self.panel_text = ""
+
+    -- Step 1: per-paragraph hash lookup. Build a parallel list of results
+    -- so we know which slots are misses and need AI fallback.
+    local paragraphs = {}
+    for paragraph in (current .. "\n\n"):gmatch("(.-)\n\n") do
+        if paragraph ~= "" then table.insert(paragraphs, paragraph) end
     end
-    self:refreshPanel()
+    local results = {}              -- [i] = tgt or nil (miss)
+    local hit_positions = {}        -- positions in JSON ordered list
+    local miss_indices = {}
+    for i, p in ipairs(paragraphs) do
+        local tgt = Aligned:lookupParagraph(book_file, p,
+            self.config.anchor_min_confidence)
+        results[i] = tgt
+        if tgt then
+            local pos = Aligned:posForParagraph(book_file, p)
+            if pos then table.insert(hit_positions, pos) end
+        else
+            table.insert(miss_indices, i)
+        end
+    end
+
+    local function render()
+        local parts = {}
+        for i = 1, #paragraphs do
+            if results[i] and results[i] ~= "" then table.insert(parts, results[i]) end
+        end
+        self.panel_text = table.concat(parts, "\n\n")
+        self:refreshPanel()
+    end
+
+    -- Step 2: if everything hit OR no AI is available, render now.
+    if #miss_indices == 0 then render(); return end
+    if not self.config.ai_api_key or #self.config.ai_api_key < 10 then
+        render(); return
+    end
+    if not self.config.aligned_ai_fallback then
+        render(); return
+    end
+
+    -- Step 3: AI selects a translation range from the corpus. AI does NOT
+    -- translate — it only picks two integers (first/last corpus index) that
+    -- bracket the page's content. Then we splice the human translation
+    -- verbatim, eliminating any chance of AI echoing source or hallucinating.
+    render()  -- show partial result immediately
+
+    -- Pull a wider corpus window (24 entries around any hit, or fall back to
+    -- a global rough position if there were no hits on this page).
+    local doc = Aligned:loadForBook(book_file)
+    if not doc or not doc.paragraphs then return end
+    local window = 24
+    local center
+    if #hit_positions > 0 then
+        center = hit_positions[1]
+    else
+        -- crude page-fraction guess
+        local pct = (self.ui.document:getCurrentPage() or 1) /
+                    math.max(1, self.ui.document:getPageCount() or 1)
+        center = math.max(1, math.floor(#doc.paragraphs * pct))
+    end
+    local lo = math.max(1, center - window)
+    local hi = math.min(#doc.paragraphs, center + window)
+    local corpus = {}
+    for i = lo, hi do
+        local p = doc.paragraphs[i]
+        if p then table.insert(corpus, { src = p.src, tgt = p.tgt, abs_idx = i }) end
+    end
+    local tgt_lang = (doc.tgt and doc.tgt.lang) or "??"
+
+    local req_page = page
+    AI:matchAligned(self.config, paragraphs, corpus, tgt_lang,
+                    function(range, err)
+        if err or not range then return end
+        local cur_page = self.ui and self.ui.document
+                         and self.ui.document:getCurrentPage()
+        if cur_page ~= req_page then return end
+        -- Splice the corpus tgt-paragraphs deterministically.
+        local f = math.max(1, math.min(range.first, #corpus))
+        local l = math.max(f,  math.min(range.last,  #corpus))
+        local pieces = {}
+        for i = f, l do table.insert(pieces, corpus[i].tgt or "") end
+        local final = table.concat(pieces, "\n\n")
+        if final ~= "" then
+            self.panel_text = final
+            self:refreshPanel()
+        end
+    end, true)
 end
 
 -- Bump this when the AI prompt changes, to invalidate stale cached translations.
