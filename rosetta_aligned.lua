@@ -128,7 +128,13 @@ end
 -- For misses, the corresponding paragraph in the output is left untouched
 -- (caller may decide to re-translate those paragraphs via the AI pipeline).
 -- ---------------------------------------------------------------------------
-function Aligned:lookupBlock(book_file, block_text, min_confidence)
+-- Lookup every paragraph in `block_text`. Returns (joined, hits, misses).
+-- `miss_marker` controls what to insert when a paragraph has no alignment:
+--   nil (default) -> insert the source paragraph verbatim (AI-fallback flow:
+--                    something visible that the AI step can translate later)
+--   ""            -> drop the paragraph entirely (pure aligned-only flow)
+--   any string    -> insert that string in place of the missing paragraph
+function Aligned:lookupBlock(book_file, block_text, min_confidence, miss_marker)
     if not block_text or block_text == "" then return nil, 0, 0 end
     local doc = self:loadForBook(book_file)
     if not doc then return nil, 0, 0 end
@@ -146,7 +152,11 @@ function Aligned:lookupBlock(book_file, block_text, min_confidence)
                 end
                 hits = hits + 1
             else
-                table.insert(out, paragraph)
+                if miss_marker == nil then
+                    table.insert(out, paragraph)
+                elseif miss_marker ~= "" then
+                    table.insert(out, miss_marker)
+                end
                 last_tgt = nil
                 misses = misses + 1
             end

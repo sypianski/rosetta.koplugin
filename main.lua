@@ -362,12 +362,16 @@ function rosetta:translateCurrentPageAligned(page, current)
         self.panel_text = "No book open."
         self:refreshPanel(); return
     end
+    -- Pure aligned-only flow: drop missing paragraphs rather than echoing
+    -- the Polish source into the panel (the previous behavior was meant for
+    -- the AI-fallback flow where a later step would translate the misses).
+    local MISS_MARKER = "_[…]_"
     local aligned, hits, misses = Aligned:lookupBlock(book_file, current,
-        self.config.anchor_min_confidence)
+        self.config.anchor_min_confidence, MISS_MARKER)
     if aligned and hits > 0 then
         if misses > 0 then
             self.panel_text = aligned ..
-                "\n\n_[" .. misses .. " paragraph(s) without alignment]_"
+                "\n\n_[" .. misses .. " paragraph(s) without alignment — switch backend to Google/AI to fill them in]_"
         else
             self.panel_text = aligned
         end
