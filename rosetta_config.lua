@@ -17,7 +17,7 @@ local defaults = {
     line_spacing_override = 0, -- 0 = follow book; else explicit % (50-200)
     paragraph_indent_chars = 0,-- prepend N spaces to each paragraph (0 = off)
     font_override = "",        -- "" = follow book; else crengine face name
-    formatting_mode = "plain", -- "plain" | "html" (preserve titles/italic/bold via MuPDF)
+    formatting_mode = "plain", -- always plain; HTML mode removed (MuPDF render lost crengine fonts)
     clear_cache_on_start = false, -- diagnostic: nuke translation cache every restart
     backend = "google",  -- "google" | "ai"
     ai_api_key = "",
@@ -26,6 +26,7 @@ local defaults = {
     ai_temperature = 0.3,
     ai_max_tokens = 4096,
     anchor_min_confidence = 0.6, -- paraligilo anchor threshold; below this we fall back to AI
+    paraligilo_path = os.getenv("PARALIGILO_HOME") or (os.getenv("HOME") .. "/utensili/paraligilo"),
 }
 
 function Config:load()

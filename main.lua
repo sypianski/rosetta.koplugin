@@ -568,6 +568,7 @@ function rosetta:showSettingsDialog()
     if not self.config then
         self.config = Config:load()
     end
+    UI._book_file = self.ui and self.ui.document and self.ui.document.file or nil
     UI:showSettingsDialog(self.config, Config,
         function()
             self:refreshPanel()
@@ -1067,7 +1068,7 @@ end
 
 function rosetta:addToMainMenu(menu_items)
     menu_items.rosetta = {
-        text = "rosetta",
+        text = "Rosetta - bilingual view",
         sorting_hint = "typeset",
         sub_item_table = {
             {

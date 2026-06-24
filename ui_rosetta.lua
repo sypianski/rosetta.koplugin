@@ -380,6 +380,241 @@ function UI:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
                     end, reopen)
             end,
         }
+        -- ── Alignment helpers ──
+        local InfoMessage = require("ui/widget/infomessage")
+        local function book_file()
+            return self._book_file or ""
+        end
+        local function anchor_path()
+            local f = book_file()
+            return f ~= "" and (f .. ".sdr/rosetta-aligned.json") or nil
+        end
+        local function file_exists(p)
+            local fh = p and io.open(p, "rb"); if not fh then return false end
+            fh:close(); return true
+        end
+        local function pair_path()
+            local f = book_file()
+            return f ~= "" and (f .. ".sdr/rosetta-paired.txt") or nil
+        end
+        local function read_pair()
+            local p = pair_path(); if not p then return nil end
+            local fh = io.open(p, "rb"); if not fh then return nil end
+            local s = fh:read("*a"); fh:close()
+            return (s or ""):gsub("[\r\n]+$", "")
+        end
+        local btn_pair_epub = {
+            text = "Add target EPUB…",
+            callback = function()
+                UIManager:close(dialog)
+                local p = pair_path()
+                if not p then
+                    UIManager:show(InfoMessage:new{ text = "No book open." })
+                    reopen(); return
+                end
+                local PathChooser = require("ui/widget/pathchooser")
+                local start_dir = book_file():match("^(.*)/[^/]+$") or "/"
+                local chooser
+                chooser = PathChooser:new{
+                    title = "Pick translation EPUB",
+                    path = start_dir,
+                    select_directory = false,
+                    select_file = true,
+                    show_files = true,
+                    file_filter = function(filename)
+                        return filename:lower():match("%.epub$") ~= nil
+                    end,
+                    onConfirm = function(src)
+                        os.execute(string.format("mkdir -p %q", p:match("^(.*)/[^/]+$") or "."))
+                        local fh = io.open(p, "wb")
+                        if not fh then
+                            UIManager:show(InfoMessage:new{ text = "Cannot write: " .. p })
+                            reopen(); return
+                        end
+                        fh:write(src); fh:close()
+                        UIManager:show(InfoMessage:new{
+                            text = "Paired with:\n" .. src .. "\n\nUse \"Generate via paraligilo\" to compute the alignment.",
+                        })
+                        reopen()
+                    end,
+                }
+                UIManager:show(chooser)
+            end,
+        }
+        local function pair_status_short()
+            local pp = pair_path()
+            if pp and file_exists(pp) then return "paired" end
+            return "none"
+        end
+        -- pair_status_short is called at row-build time below; status text:
+        local anchor_status_text = (function()
+            local p = anchor_path()
+            local ap = (p and file_exists(p)) and "anchor" or "no anchor"
+            local pp = pair_status_short()
+            return "Status: " .. ap .. " / " .. pp
+        end)()
+        local btn_anchor_status = {
+            text = anchor_status_text,
+            callback = function()
+                local p = anchor_path()
+                local msg
+                if not p then
+                    msg = "No book is open."
+                elseif file_exists(p) then
+                    msg = "Anchor file found:\n" .. p
+                else
+                    msg = "No anchor file at:\n" .. p .. "\n\nPaths searched:\n  • <book>.sdr/rosetta-aligned.json"
+                end
+                UIManager:close(dialog)
+                UIManager:show(InfoMessage:new{ text = msg })
+                reopen()
+            end,
+        }
+        local btn_set_anchor = {
+            text = "Add anchor file…",
+            callback = function()
+                UIManager:close(dialog)
+                local p = anchor_path()
+                if not p then
+                    UIManager:show(InfoMessage:new{ text = "No book open." })
+                    reopen(); return
+                end
+                local PathChooser = require("ui/widget/pathchooser")
+                local start_dir = book_file():match("^(.*)/[^/]+$") or "/"
+                local chooser
+                chooser = PathChooser:new{
+                    title = "Pick rosetta-aligned.json",
+                    path = start_dir,
+                    select_directory = false,
+                    select_file = true,
+                    show_files = true,
+                    onConfirm = function(src)
+                        local sfh = io.open(src, "rb")
+                        if not sfh then
+                            UIManager:show(InfoMessage:new{ text = "Cannot open: " .. src })
+                            reopen(); return
+                        end
+                        local body = sfh:read("*a"); sfh:close()
+                        os.execute(string.format("mkdir -p %q", p:match("^(.*)/[^/]+$") or "."))
+                        local dfh = io.open(p, "wb")
+                        if not dfh then
+                            UIManager:show(InfoMessage:new{ text = "Cannot write: " .. p })
+                            reopen(); return
+                        end
+                        dfh:write(body); dfh:close()
+                        UIManager:show(InfoMessage:new{
+                            text = "Installed:\n" .. p .. "\n\nReopen the book to use anchors.",
+                        })
+                        reopen()
+                    end,
+                }
+                UIManager:show(chooser)
+            end,
+        }
+        local btn_run_paraligilo = {
+            text = "Generate via paraligilo",
+            callback = function()
+                UIManager:close(dialog)
+                local orig = book_file()
+                local trans = read_pair()
+                local par_home = config.paraligilo_path or ""
+                local run_py = par_home .. "/run.py"
+                local emit_py = par_home .. "/emit_rosetta.py"
+                if orig == "" then
+                    UIManager:show(InfoMessage:new{ text = "No book open." }); reopen(); return
+                end
+                if not trans or trans == "" then
+                    UIManager:show(InfoMessage:new{
+                        text = "No target EPUB paired.\nUse \"Add target EPUB…\" first.",
+                    }); reopen(); return
+                end
+                if not file_exists(run_py) or not file_exists(emit_py) then
+                    UIManager:show(InfoMessage:new{
+                        text = "paraligilo scripts not found at:\n" .. par_home
+                            .. "\n\nInstall paraligilo or set paraligilo_path "
+                            .. "in ~/.config/koreader/settings/rosetta.lua.\n\n"
+                            .. "Or use the web UI: sypian.ski/paraligilo",
+                    }); reopen(); return
+                end
+
+                -- pick a mode
+                local mode_dlg
+                local function run_with(mode_args, mode_label)
+                    UIManager:close(mode_dlg)
+                    local slug = orig:match("([^/]+)%.epub$") or "rosetta_pair"
+                    slug = slug:gsub("[^%w]+", "_")
+                    local workdir = "/tmp/rosetta-paraligilo-" .. slug
+                    os.execute(string.format("mkdir -p %q", workdir))
+                    local out_json = orig .. ".sdr/rosetta-aligned.json"
+                    os.execute(string.format("mkdir -p %q", orig .. ".sdr"))
+
+                    local Trapper = require("ui/trapper")
+                    local TrapWidget = require("ui/widget/trapwidget")
+                    local trap = TrapWidget:new{
+                        text = "paraligilo: aligning (" .. mode_label .. ")…\nThis may take 30s–5min.",
+                    }
+                    UIManager:show(trap)
+                    Trapper:wrap(function()
+                        local cmd1 = string.format(
+                            "cd %q && %q %q %q --name %s --workdir %q %s 2>&1",
+                            par_home, run_py, orig, trans, slug, workdir, mode_args)
+                        local ok1 = Trapper:dismissableRunInSubprocess(function()
+                            local p = io.popen(cmd1, "r")
+                            local out = p:read("*a"); local _, _, rc = p:close()
+                            return rc, out
+                        end, trap)
+                        if not ok1 then
+                            UIManager:close(trap)
+                            UIManager:show(InfoMessage:new{ text = "Cancelled." })
+                            reopen(); return
+                        end
+                        local cmd2 = string.format(
+                            "%q --orig-jsonl %q --trans-jsonl %q --align %q "
+                            .. "--src-file %q --tgt-file %q --method %s -o %q 2>&1",
+                            emit_py,
+                            workdir .. "/" .. slug .. "_orig.jsonl",
+                            workdir .. "/" .. slug .. "_trans.jsonl",
+                            workdir .. "/" .. slug .. "_final.jsonl",
+                            orig, trans, mode_label, out_json)
+                        local ok2 = Trapper:dismissableRunInSubprocess(function()
+                            local p = io.popen(cmd2, "r")
+                            local out = p:read("*a"); local _, _, rc = p:close()
+                            return rc, out
+                        end, trap)
+                        UIManager:close(trap)
+                        if not ok2 then
+                            UIManager:show(InfoMessage:new{ text = "Cancelled during emit." })
+                        elseif file_exists(out_json) then
+                            UIManager:show(InfoMessage:new{
+                                text = "Anchor file generated:\n" .. out_json
+                                    .. "\n\nTurn a page to use the alignment.",
+                            })
+                        else
+                            UIManager:show(InfoMessage:new{
+                                text = "paraligilo finished but no anchor file produced.\n"
+                                    .. "Check " .. workdir .. " for intermediates.",
+                            })
+                        end
+                        reopen()
+                    end)
+                end
+                local function mb(label, args)
+                    return { text = label, callback = function() run_with(args, label) end }
+                end
+                mode_dlg = ButtonDialogTitle:new{
+                    title = "paraligilo alignment mode",
+                    buttons = {
+                        { mb("gale-church", "--mode deterministic") },
+                        { mb("embeddings",  "--mode ai") },
+                        { mb("hybrid",      "--mode ai --llm") },
+                        { { text = "Cancel", callback = function()
+                            UIManager:close(mode_dlg); reopen() end } },
+                    },
+                }
+                UIManager:show(mode_dlg)
+            end,
+        }
+
         local btn_close = {
             text = "Close",
             callback = function()
@@ -387,19 +622,25 @@ function UI:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
             end,
         }
 
+        local empty = { text = " ", callback = function() end }
+        local hdr_translation = { { text = "── Translation ──", callback = function() end } }
+        local hdr_formatting  = { { text = "── Formatting ──",  callback = function() end } }
+        local hdr_alignment   = { { text = "── Alignment ──",   callback = function() end } }
         dialog = ButtonDialogTitle:new{
             title = "rosetta",
             buttons = {
-                header("Translation"),
-                { btn_source,       btn_target       },
-                { btn_backend,      btn_auto         },
-                { btn_formatting,   btn_panel        },
-                header("AI"),
-                { btn_ai_model,     btn_ai_key       },
-                { btn_ai_url                          },
-                header("Typography"),
-                { btn_font,         btn_font_size    },
-                { btn_line_spacing, btn_indent       },
+                hdr_translation,
+                { btn_source,         btn_target          },
+                { btn_backend,        btn_auto            },
+                { btn_ai_model,       btn_ai_key          },
+                { btn_ai_url,         empty               },
+                hdr_alignment,
+                { btn_anchor_status,  btn_set_anchor      },
+                { btn_pair_epub,      btn_run_paraligilo  },
+                hdr_formatting,
+                { btn_font,           btn_font_size       },
+                { btn_line_spacing,   btn_indent          },
+                { btn_panel,          empty               },
                 { btn_close },
             },
         }
