@@ -403,6 +403,86 @@ function UI:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
             local s = fh:read("*a"); fh:close()
             return (s or ""):gsub("[\r\n]+$", "")
         end
+        local btn_auto_detect = {
+            text = "Auto-detect…",
+            callback = function()
+                UIManager:close(dialog)
+                local orig = book_file()
+                if orig == "" then
+                    UIManager:show(InfoMessage:new{ text = "No book open." })
+                    reopen(); return
+                end
+                local sdr = orig .. ".sdr"
+                local notes = {}
+
+                -- 1. anchor JSON / Lua already in .sdr/
+                local anchor_candidates = {
+                    sdr .. "/rosetta-aligned.json",
+                    sdr .. "/rosetta-aligned.lua",
+                }
+                local anchor_found
+                for _, p in ipairs(anchor_candidates) do
+                    if file_exists(p) then
+                        anchor_found = p
+                        table.insert(notes, "anchor: " .. p)
+                        break
+                    end
+                end
+                if not anchor_found then
+                    table.insert(notes, "anchor: not found in " .. sdr .. "/")
+                end
+
+                -- 2. paired EPUB: try existing rosetta-paired.txt first, else
+                -- read tgt.file from the anchor JSON, else scan siblings
+                local pair_p = pair_path()
+                local pair_now = read_pair()
+                if pair_now and pair_now ~= "" and file_exists(pair_now) then
+                    table.insert(notes, "pair: already set → " .. pair_now)
+                elseif anchor_found and anchor_found:match("%.json$") then
+                    local fh = io.open(anchor_found, "rb")
+                    if fh then
+                        local body = fh:read("*a"); fh:close()
+                        local tgt = body:match('"tgt"%s*:%s*{[^}]-"file"%s*:%s*"([^"]+)"')
+                        if tgt and file_exists(tgt) then
+                            local wfh = io.open(pair_p, "wb")
+                            if wfh then wfh:write(tgt); wfh:close()
+                                table.insert(notes, "pair: from anchor → " .. tgt)
+                            end
+                        end
+                    end
+                end
+                if not pair_now or pair_now == "" or not file_exists(pair_now or "") then
+                    -- scan siblings
+                    local dir, fname = orig:match("^(.*)/([^/]+)$")
+                    dir = dir or "."
+                    local base = (fname or ""):gsub("%.epub$", "")
+                    local cmd = string.format("ls -1 %q/*.epub 2>/dev/null", dir)
+                    local p = io.popen(cmd, "r")
+                    local found_siblings = {}
+                    if p then
+                        for line in p:lines() do
+                            if line ~= orig and line:lower():match("%.epub$") then
+                                table.insert(found_siblings, line)
+                            end
+                        end
+                        p:close()
+                    end
+                    if #found_siblings == 1 then
+                        local wfh = io.open(pair_p, "wb")
+                        if wfh then wfh:write(found_siblings[1]); wfh:close()
+                            table.insert(notes, "pair: single sibling → " .. found_siblings[1])
+                        end
+                    elseif #found_siblings > 1 then
+                        table.insert(notes, "pair: " .. #found_siblings .. " sibling EPUBs — use \"Add target EPUB…\" to pick one")
+                    elseif (not pair_now) or pair_now == "" then
+                        table.insert(notes, "pair: no sibling EPUBs in " .. dir)
+                    end
+                end
+
+                UIManager:show(InfoMessage:new{ text = table.concat(notes, "\n") })
+                reopen()
+            end,
+        }
         local btn_pair_epub = {
             text = "Add target EPUB…",
             callback = function()
@@ -635,8 +715,9 @@ function UI:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
                 { btn_ai_model,       btn_ai_key          },
                 { btn_ai_url,         empty               },
                 hdr_alignment,
-                { btn_anchor_status,  btn_set_anchor      },
-                { btn_pair_epub,      btn_run_paraligilo  },
+                { btn_anchor_status,  btn_auto_detect     },
+                { btn_set_anchor,     btn_pair_epub       },
+                { btn_run_paraligilo, empty               },
                 hdr_formatting,
                 { btn_font,           btn_font_size       },
                 { btn_line_spacing,   btn_indent          },
