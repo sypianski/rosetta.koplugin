@@ -27,6 +27,7 @@ local defaults = {
     ai_max_tokens = 4096,
     anchor_min_confidence = 0.0, -- 0 = show every aligned entry, even noisy ones; raise to drop low-confidence pairs
     aligned_ai_fallback = true,  -- backend=aligned: for paragraphs that miss the hash lookup, call AI with the page text + a window of nearby JSON entries as a bilingual corpus
+    aligned_dump_pages = false,  -- opt-in: dump page text to /tmp/rosetta-page-NNN.txt for offline analysis (slice_proportional.py in paraligilo/tests/regression)
     paraligilo_path = os.getenv("PARALIGILO_HOME") or (os.getenv("HOME") .. "/utensili/paraligilo"),
 }
 

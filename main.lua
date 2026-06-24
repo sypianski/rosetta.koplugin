@@ -363,15 +363,43 @@ function rosetta:translateCurrentPageAligned(page, current)
         self:refreshPanel(); return
     end
 
-    -- Step 1: per-paragraph hash lookup. Build a parallel list of results
-    -- so we know which slots are misses and need AI fallback.
+    -- Optional debug dump: capture page_text so the offline experiment
+    -- (slice_proportional.py) can be fed actual KOReader-rendered text.
+    if self.config and self.config.aligned_dump_pages then
+        local fn = string.format("/tmp/rosetta-page-%03d.txt", tonumber(page) or 0)
+        local f = io.open(fn, "w")
+        if f then f:write(current or ""); f:close() end
+    end
+
+    -- Proportional slice — full-paragraph hash hits where they exist,
+    -- suffix/prefix partial anchors + char-fraction tgt slice for the
+    -- edge paragraphs that got cut by the page break.  See
+    -- rosetta_aligned.lua:slicePage() for the algorithm.
+    local sliced, info = Aligned:slicePage(book_file, current)
+    if sliced and sliced ~= "" then
+        self.panel_text = sliced
+        -- info.continuation is true when the first source paragraph is a
+        -- mid-paragraph continuation; otherwise consult the source-side
+        -- helper as a backup (handles the case where the first paragraph
+        -- happened to land on a hash hit but is still a continuation).
+        local cont = (info and info.continuation) == true
+        if not cont then
+            cont = self:_isPageStartContinuationFromSource(page) == true
+        end
+        self.panel_continuation = cont
+        self:refreshPanel()
+        return
+    end
+
+    -- slicePage returned nothing — either no JSON or every paragraph missed
+    -- without a recoverable partial anchor.  Fall through to legacy AI path
+    -- when the user has it enabled.  Keep paragraph list + hit positions for
+    -- the AI branch's corpus-windowing logic.
     local paragraphs = {}
     for paragraph in (current .. "\n\n"):gmatch("(.-)\n\n") do
         if paragraph ~= "" then table.insert(paragraphs, paragraph) end
     end
-    local results = {}              -- [i] = tgt or nil (miss)
-    local hit_positions = {}        -- positions in JSON ordered list
-    local miss_indices = {}
+    local results, hit_positions, miss_indices = {}, {}, {}
     for i, p in ipairs(paragraphs) do
         local tgt = Aligned:lookupParagraph(book_file, p,
             self.config.anchor_min_confidence)
@@ -390,10 +418,10 @@ function rosetta:translateCurrentPageAligned(page, current)
             if results[i] and results[i] ~= "" then table.insert(parts, results[i]) end
         end
         self.panel_text = table.concat(parts, "\n\n")
+        self.panel_continuation = self:_isPageStartContinuationFromSource(page)
         self:refreshPanel()
     end
 
-    -- Step 2: if everything hit OR no AI is available, render now.
     if #miss_indices == 0 then render(); return end
     if not self.config.ai_api_key or #self.config.ai_api_key < 10 then
         render(); return
@@ -402,51 +430,113 @@ function rosetta:translateCurrentPageAligned(page, current)
         render(); return
     end
 
-    -- Step 3: AI selects a translation range from the corpus. AI does NOT
-    -- translate — it only picks two integers (first/last corpus index) that
-    -- bracket the page's content. Then we splice the human translation
-    -- verbatim, eliminating any chance of AI echoing source or hallucinating.
-    render()  -- show partial result immediately
+    -- Step 3: AI selects a verbatim phrase pair from the EO corpus that
+    -- brackets the page's content. We DON'T render the partial hash-only
+    -- result first — that produces a flicker (wrong-split appears briefly,
+    -- then snaps to the correct sliced version after the AI returns ~1-2s
+    -- later). Instead show a small placeholder and replace it when done.
+    -- Centered ellipsis placeholder while AI thinks. The plain-mode panel
+    -- renders segments starting with "#" as centred TextBoxWidget headings,
+    -- so prefixing with "# " gives us a centred line for free.
+    self.panel_text = "# …"
+    self:refreshPanel()
+    -- Timeout fallback: if AI doesn't respond in 15s, fall back to hash-only
+    -- render so the user isn't stuck staring at the ellipsis forever.
+    local ai_done = false
+    local UIManager = require("ui/uimanager")
+    UIManager:scheduleIn(15, function()
+        if ai_done then return end
+        local cp = self.ui and self.ui.document and self.ui.document:getCurrentPage()
+        if cp ~= page then return end
+        render()
+    end)
 
-    -- Pull a wider corpus window (24 entries around any hit, or fall back to
-    -- a global rough position if there were no hits on this page).
     local doc = Aligned:loadForBook(book_file)
     if not doc or not doc.paragraphs then return end
     local window = 24
+    -- Carry the last successful anchor position forward as a fallback. This
+    -- lets pages with mid-paragraph content (and thus 0 exact hash hits)
+    -- still resolve when they sit between two anchored pages.
+    self._last_anchor = self._last_anchor or {}
     local center
     if #hit_positions > 0 then
-        center = hit_positions[1]
+        table.sort(hit_positions)
+        center = hit_positions[math.ceil(#hit_positions / 2)]
+        self._last_anchor[book_file] = { pos = center, page = page }
     else
-        -- crude page-fraction guess
-        local pct = (self.ui.document:getCurrentPage() or 1) /
-                    math.max(1, self.ui.document:getPageCount() or 1)
-        center = math.max(1, math.floor(#doc.paragraphs * pct))
+        -- Only carry an anchor forward on FORWARD navigation by ≤3 pages.
+        -- Backward navigation or large jumps re-open the gap-on-skipped-
+        -- content trap, so refuse and show an empty panel honestly.
+        local prev = self._last_anchor[book_file]
+        local delta = prev and (page - prev.page) or nil
+        if not (prev and delta and delta >= 1 and delta <= 3) then
+            self.panel_text = ""
+            self:refreshPanel()
+            return
+        end
+        local carry = prev.next_start or (prev.pos + delta)
+        center = math.max(1, math.min(#doc.paragraphs, carry))
     end
     local lo = math.max(1, center - window)
     local hi = math.min(#doc.paragraphs, center + window)
-    local corpus = {}
+    -- Build a continuous EO chunk by concatenating tgt paragraphs. Dedupe
+    -- ONLY adjacent identical entries — earlier we deduped globally across
+    -- the window, which dropped legitimate distinct paragraphs whose tgt
+    -- accidentally collided with another entry (in a long book some short
+    -- dialogue lines reappear verbatim). The duplicate-tgt cases that
+    -- matter are emit_rosetta-side: consecutive src paragraphs mapping to
+    -- the same tgt entry get the same string here too.
+    local chunk_parts, chunk_pos, prev = {}, {}, nil
     for i = lo, hi do
         local p = doc.paragraphs[i]
-        if p then table.insert(corpus, { src = p.src, tgt = p.tgt, abs_idx = i }) end
+        if p and p.tgt and p.tgt ~= "" and p.tgt ~= prev then
+            table.insert(chunk_parts, p.tgt)
+            table.insert(chunk_pos, i)
+            prev = p.tgt
+        end
     end
+    local corpus_text = table.concat(chunk_parts, "\n\n")
     local tgt_lang = (doc.tgt and doc.tgt.lang) or "??"
 
     local req_page = page
-    AI:matchAligned(self.config, paragraphs, corpus, tgt_lang,
-                    function(range, err)
-        if err or not range then return end
+    AI:matchAligned(self.config, current, corpus_text, tgt_lang,
+                    function(phr, err)
+        ai_done = true
         local cur_page = self.ui and self.ui.document
                          and self.ui.document:getCurrentPage()
         if cur_page ~= req_page then return end
-        -- Splice the corpus tgt-paragraphs deterministically.
-        local f = math.max(1, math.min(range.first, #corpus))
-        local l = math.max(f,  math.min(range.last,  #corpus))
-        local pieces = {}
-        for i = f, l do table.insert(pieces, corpus[i].tgt or "") end
-        local final = table.concat(pieces, "\n\n")
-        if final ~= "" then
-            self.panel_text = final
-            self:refreshPanel()
+        local function fallback()
+            -- AI gave nothing usable — fall back to hash-only paragraph render.
+            render()
+        end
+        if err or not phr or not phr.first or phr.first == ""
+           or not phr.last or phr.last == "" then
+            fallback(); return
+        end
+        local s = corpus_text:find(phr.first, 1, true)
+        if not s then fallback(); return end
+        local e_start = corpus_text:find(phr.last, s, true)
+        if not e_start then fallback(); return end
+        local final = corpus_text:sub(s, e_start + #phr.last - 1)
+        if final == "" then fallback(); return end
+        self.panel_text = final
+        self:refreshPanel()
+        -- Remember which paragraph the slice ended in, so the next page
+        -- (often 0-hash-hits in the same continuous run) can resume from
+        -- exactly the right point in the corpus.
+        local end_char = e_start + #phr.last - 1
+        local acc = 0
+        for k, piece in ipairs(chunk_parts) do
+            acc = acc + #piece + 2  -- +2 for "\n\n" separator
+            if acc >= end_char then
+                local end_pos = chunk_pos[k]
+                self._last_anchor[book_file] = {
+                    pos = end_pos,
+                    page = req_page,
+                    next_start = math.min(#doc.paragraphs, end_pos + 1),
+                }
+                break
+            end
         end
     end, true)
 end
