@@ -54,17 +54,22 @@ local function normalize(text)
     -- the tags but keeps the text, so the markers desync the hashes.
     text = text:gsub("%*+", "")
     -- Strip stray footnote-suffix digits glued onto a word: 'Graniczna3' or
-    -- 'ingrediencję2' becomes 'Graniczna' / 'ingrediencję'. crengine renders
-    -- <sup>N</sup> as inline digits without a separating space, while we
-    -- already dropped the <sup> in extract.py. Restore parity by stripping
-    -- both forms here.
-    text = text:gsub("(%a)%d+", "%1")
+    -- 'ingrediencję2' becomes 'Graniczna' / 'ingrediencję'. Lua's %a is
+    -- ASCII-only, so use a byte-class that matches anything that isn't
+    -- whitespace/digit/punct (catches UTF-8 trailing bytes of letters like ę).
+    text = text:gsub("([^%s%d%p])%d+", "%1")
     -- Strip stray inline footnote markers: "word N word" -> "word word".
     for _ = 1, 2 do
-        text = text:gsub("(%a)%s+%d%d?%d?%s+(%a)", "%1 %2")
+        text = text:gsub("([^%s%d%p])%s+%d%d?%d?%s+([^%s%d%p])", "%1 %2")
     end
     text = text:gsub("[%s\t\r\n]+", " ")
     text = text:gsub("^%s+", ""):gsub("%s+$", "")
+    -- Drop whitespace adjacent to punctuation. paraligilo's HTML extract
+    -- inserts " " between adjacent inline elements (e.g. „<em>X</em>!" -> '„ X !'),
+    -- while crengine renders them flush ('„X!'). Normalize to flush on both
+    -- sides so the hashes line up.
+    text = text:gsub("%s+([%!%?%.,;:%)%]%}\"'])", "%1")
+    text = text:gsub("([%(%[%{\"'])%s+", "%1")
     return text:lower()
 end
 

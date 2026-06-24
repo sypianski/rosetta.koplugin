@@ -25,7 +25,7 @@ The original page stays in place; a panel at the bottom shows the same page rend
 - **Inline formatting**: markdown markers (`# `, `## `, `*…*`, `**…**`, `• `) are preserved by the prompt and rendered as real headings (centered, bold, scaled) and inline italic / bold via a small mixed-style line-layout engine.
 - **Page-boundary handling**: source-side check on the previous page's tail + lowercase heuristic + AI marker decide whether a page begins as a continuation (no indent) or a fresh paragraph (indent). Soft-hyphen joins (`gene-rations` → one word) at the boundary.
 - **Fleuron (`❦`)** separator between book and panel, manicule (`☞`) when the last sentence is cut off.
-- **Human translation via [paraligilo](https://github.com/sypianski/paraligilo) anchors**: drop a `rosetta-aligned.json` into the book's `.sdr/` directory and Rosetta will serve the human-translated text instead of calling AI per page. The file follows the [epub-parallel-align](https://github.com/sypianski/epub-parallel-align) open spec — see [ANCHOR_FORMAT.md](ANCHOR_FORMAT.md) for Rosetta-specific notes and [paraligilo](https://github.com/sypianski/paraligilo) for how to produce it.
+- **Human translation via [paraligilo](https://github.com/sypianski/paraligilo) anchors**: drop a `parallel-aligned.json` into the book's `.sdr/` directory and Rosetta will serve the human-translated text instead of calling AI per page. The file follows the [parallel-align-spec](https://github.com/sypianski/parallel-align-spec) open spec — see [ANCHOR_FORMAT.md](ANCHOR_FORMAT.md) for Rosetta-specific notes and [paraligilo](https://github.com/sypianski/paraligilo) for how to produce it.
 
 ---
 

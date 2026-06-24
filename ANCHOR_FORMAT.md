@@ -1,8 +1,8 @@
 # Rosetta Anchor File Format (`parallel-aligned.json`)
 
-The anchor file follows the **[epub-parallel-align](https://github.com/sypianski/epub-parallel-align)** open specification — a content-hash-keyed sidecar format for bilingual EPUB paragraph alignment.
+The anchor file follows the **[parallel-align-spec](https://github.com/sypianski/parallel-align-spec)** open specification — a content-hash-keyed sidecar format for bilingual EPUB paragraph alignment.
 
-This document is Rosetta's implementation notes on top of that spec.  For the canonical schema, normalization algorithm, and JSON Schema, see [epub-parallel-align](https://github.com/sypianski/epub-parallel-align).
+This document is Rosetta's implementation notes on top of that spec.  For the canonical schema, normalization algorithm, and JSON Schema, see [parallel-align-spec](https://github.com/sypianski/parallel-align-spec).
 
 The anchor file is produced by [paraligilo](https://github.com/sypianski/paraligilo) and consumed by Rosetta at read-time.  It lives in the book's KOReader sidecar:
 
