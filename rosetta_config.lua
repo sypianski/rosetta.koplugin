@@ -25,7 +25,7 @@ local defaults = {
     ai_model = "google/gemini-2.5-flash",
     ai_temperature = 0.3,
     ai_max_tokens = 4096,
-    anchor_min_confidence = 0.6, -- paraligilo anchor threshold; below this we fall back to AI
+    anchor_min_confidence = 0.0, -- 0 = show every aligned entry, even noisy ones; raise to drop low-confidence pairs
     paraligilo_path = os.getenv("PARALIGILO_HOME") or (os.getenv("HOME") .. "/utensili/paraligilo"),
 }
 
