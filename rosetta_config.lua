@@ -25,6 +25,7 @@ local defaults = {
     ai_model = "google/gemini-2.5-flash",
     ai_temperature = 0.3,
     ai_max_tokens = 4096,
+    anchor_min_confidence = 0.6, -- paraligilo anchor threshold; below this we fall back to AI
 }
 
 function Config:load()

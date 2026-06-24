@@ -253,203 +253,154 @@ function UI:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
 
     UIManager:scheduleIn(0.1, function()
         local dialog
+
+        -- Local helpers to build entries
+        local function reopen()
+            self:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
+        end
+        local function header(text)
+            -- non-clickable header row
+            return { { text = "── " .. text .. " ──", callback = function() end } }
+        end
+        local btn_source = {
+            text = "Source: " .. self:getLanguageName(config.source_lang),
+            callback = function()
+                UIManager:close(dialog)
+                self:showLanguagePicker("Source Language", config.source_lang,
+                    function(code) config.source_lang = code; Config:save(config) end,
+                    reopen)
+            end,
+        }
+        local btn_target = {
+            text = "Target: " .. self:getLanguageName(config.target_lang),
+            callback = function()
+                UIManager:close(dialog)
+                self:showLanguagePicker("Target Language", config.target_lang,
+                    function(code) config.target_lang = code; Config:save(config) end,
+                    reopen)
+            end,
+        }
+        local btn_backend = {
+            text = "Backend: " .. ((config.backend == "ai") and "AI" or "Google"),
+            callback = function()
+                config.backend = (config.backend == "ai") and "google" or "ai"
+                Config:save(config); UIManager:close(dialog); reopen()
+            end,
+        }
+        local btn_auto = {
+            text = "Auto-translate: " .. (config.auto_translate and "ON" or "OFF"),
+            callback = function()
+                config.auto_translate = not config.auto_translate
+                Config:save(config); UIManager:close(dialog); reopen()
+            end,
+        }
+        local btn_formatting = {
+            text = "Formatting: " .. ((config.formatting_mode == "html") and "HTML" or "plain"),
+            callback = function()
+                config.formatting_mode = (config.formatting_mode == "html") and "plain" or "html"
+                Config:save(config); UIManager:close(dialog); reopen()
+            end,
+        }
+        local btn_ai_model = {
+            text = "AI model: " .. (config.ai_model or "(unset)"),
+            callback = function()
+                UIManager:close(dialog)
+                self:showTextInput("AI model (e.g. google/gemini-2.5-flash)", config.ai_model,
+                    function(v) config.ai_model = v; Config:save(config) end, reopen)
+            end,
+        }
+        local btn_ai_key = {
+            text = "AI key: " .. ((config.ai_api_key and #config.ai_api_key > 0)
+                and ("set (" .. #config.ai_api_key .. " ch)") or "(unset)"),
+            callback = function()
+                UIManager:close(dialog)
+                self:showTextInput("OpenRouter API key (sk-or-…)", config.ai_api_key,
+                    function(v) config.ai_api_key = v; Config:save(config) end, reopen)
+            end,
+        }
+        local btn_ai_url = {
+            text = "AI URL: " .. ((config.ai_base_url or ""):match("^https?://([^/]+)") or "(unset)"),
+            callback = function()
+                UIManager:close(dialog)
+                self:showTextInput("AI base URL (OpenAI-compat /chat/completions)", config.ai_base_url,
+                    function(v) config.ai_base_url = v; Config:save(config) end, reopen)
+            end,
+        }
+        local btn_font = {
+            text = "Font: " .. ((config.font_override ~= nil and config.font_override ~= "")
+                and config.font_override or "follow book"),
+            callback = function()
+                UIManager:close(dialog)
+                self:showFontFacePicker(config.font_override or "",
+                    function(name) config.font_override = name; Config:save(config) end, reopen)
+            end,
+        }
+        local btn_font_size = {
+            text = "Size: " .. (config.font_size_percent or 100) .. "%",
+            callback = function()
+                UIManager:close(dialog)
+                self:showSimpleIntPicker("Translation Font Size (relative to book)",
+                    FONT_PERCENTS, config.font_size_percent or 100,
+                    function(v) return tostring(v) .. "%" end,
+                    function(pct) config.font_size_percent = pct; Config:save(config) end,
+                    reopen, 3)
+            end,
+        }
+        local btn_line_spacing = {
+            text = "Line spacing: " .. ((tonumber(config.line_spacing_override) or 0) > 0
+                and (tostring(config.line_spacing_override) .. "%") or "book"),
+            callback = function()
+                UIManager:close(dialog)
+                self:showSimpleIntPicker("Translation line spacing",
+                    LINE_SPACING_PERCENTS, config.line_spacing_override or 0,
+                    function(v) return v == 0 and "follow book" or (tostring(v) .. "%") end,
+                    function(v) config.line_spacing_override = v; Config:save(config) end,
+                    reopen, 3)
+            end,
+        }
+        local btn_indent = {
+            text = "Indent: " .. (config.paragraph_indent_chars or 0) .. " sp",
+            callback = function()
+                UIManager:close(dialog)
+                self:showSimpleIntPicker("Paragraph indent (spaces)",
+                    INDENT_CHARS, config.paragraph_indent_chars or 0,
+                    function(v) return v == 0 and "off" or (tostring(v) .. " sp") end,
+                    function(v) config.paragraph_indent_chars = v; Config:save(config) end,
+                    reopen, 3)
+            end,
+        }
+        local btn_panel = {
+            text = "Panel: " .. self:getPanelSizeName(config.panel_height_ratio),
+            callback = function()
+                UIManager:close(dialog)
+                self:showPanelSizePicker(config.panel_height_ratio,
+                    function(ratio)
+                        config.panel_height_ratio = ratio; Config:save(config)
+                        if on_panel_resize then on_panel_resize(ratio) end
+                    end, reopen)
+            end,
+        }
+        local btn_close = {
+            text = "Close",
+            callback = function()
+                UIManager:close(dialog); self.current_dialog = nil
+            end,
+        }
+
         dialog = ButtonDialogTitle:new{
-            title = "rosetta Settings",
+            title = "rosetta",
             buttons = {
-                {
-                    {
-                        text = "Source: " .. self:getLanguageName(config.source_lang),
-                        callback = function()
-                            UIManager:close(dialog)
-                            self:showLanguagePicker(
-                                "Source Language",
-                                config.source_lang,
-                                function(code)
-                                    config.source_lang = code
-                                    Config:save(config)
-                                end,
-                                function()
-                                    self:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
-                                end
-                            )
-                        end,
-                    },
-                },
-                {
-                    {
-                        text = "Target: " .. self:getLanguageName(config.target_lang),
-                        callback = function()
-                            UIManager:close(dialog)
-                            self:showLanguagePicker(
-                                "Target Language",
-                                config.target_lang,
-                                function(code)
-                                    config.target_lang = code
-                                    Config:save(config)
-                                end,
-                                function()
-                                    self:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
-                                end
-                            )
-                        end,
-                    },
-                },
-                {
-                    {
-                        text = "Auto-translate: " .. (config.auto_translate and "ON" or "OFF"),
-                        callback = function()
-                            config.auto_translate = not config.auto_translate
-                            Config:save(config)
-                            UIManager:close(dialog)
-                            self:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
-                        end,
-                    },
-                },
-                {
-                    {
-                        text = "Backend: " .. ((config.backend == "ai") and "AI (with context)" or "Google Translate"),
-                        callback = function()
-                            config.backend = (config.backend == "ai") and "google" or "ai"
-                            Config:save(config)
-                            UIManager:close(dialog)
-                            self:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
-                        end,
-                    },
-                },
-                {
-                    {
-                        text = "Formatting: " .. ((config.formatting_mode == "html") and "HTML (titles, italic, bold)" or "plain text"),
-                        callback = function()
-                            config.formatting_mode = (config.formatting_mode == "html") and "plain" or "html"
-                            Config:save(config)
-                            UIManager:close(dialog)
-                            self:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
-                        end,
-                    },
-                },
-                {
-                    {
-                        text = "AI model: " .. (config.ai_model or "(unset)"),
-                        callback = function()
-                            UIManager:close(dialog)
-                            self:showTextInput("AI model (e.g. google/gemini-2.5-flash)", config.ai_model,
-                                function(v) config.ai_model = v; Config:save(config) end,
-                                function() self:showSettingsDialog(config, Config, on_refresh, on_panel_resize) end)
-                        end,
-                    },
-                },
-                {
-                    {
-                        text = "AI API key: " .. ((config.ai_api_key and #config.ai_api_key > 0)
-                            and ("set (" .. tostring(#config.ai_api_key) .. " chars)") or "(unset)"),
-                        callback = function()
-                            UIManager:close(dialog)
-                            self:showTextInput("OpenRouter API key (sk-or-…)", config.ai_api_key,
-                                function(v) config.ai_api_key = v; Config:save(config) end,
-                                function() self:showSettingsDialog(config, Config, on_refresh, on_panel_resize) end)
-                        end,
-                    },
-                },
-                {
-                    {
-                        text = "AI base URL: " .. (config.ai_base_url or "(unset)"),
-                        callback = function()
-                            UIManager:close(dialog)
-                            self:showTextInput("AI base URL (OpenAI-compat /chat/completions)", config.ai_base_url,
-                                function(v) config.ai_base_url = v; Config:save(config) end,
-                                function() self:showSettingsDialog(config, Config, on_refresh, on_panel_resize) end)
-                        end,
-                    },
-                },
-                {
-                    {
-                        text = "Font: " .. ((config.font_override ~= nil and config.font_override ~= "")
-                            and config.font_override or "(follow book)"),
-                        callback = function()
-                            UIManager:close(dialog)
-                            self:showFontFacePicker(config.font_override or "",
-                                function(name) config.font_override = name; Config:save(config) end,
-                                function() self:showSettingsDialog(config, Config, on_refresh, on_panel_resize) end)
-                        end,
-                    },
-                },
-                {
-                    {
-                        text = "Font size: " .. tostring(config.font_size_percent or 100) .. "% of book",
-                        callback = function()
-                            UIManager:close(dialog)
-                            self:showSimpleIntPicker(
-                                "Translation Font Size (relative to book)",
-                                FONT_PERCENTS, config.font_size_percent or 100,
-                                function(v) return tostring(v) .. "%" end,
-                                function(pct) config.font_size_percent = pct; Config:save(config) end,
-                                function() self:showSettingsDialog(config, Config, on_refresh, on_panel_resize) end,
-                                3)
-                        end,
-                    },
-                },
-                {
-                    {
-                        text = "Line spacing: " .. (
-                            (tonumber(config.line_spacing_override) or 0) > 0
-                                and (tostring(config.line_spacing_override) .. "% override")
-                                or "follow book"),
-                        callback = function()
-                            UIManager:close(dialog)
-                            self:showSimpleIntPicker("Translation line spacing",
-                                LINE_SPACING_PERCENTS, config.line_spacing_override or 0,
-                                function(v) return v == 0 and "follow book" or (tostring(v) .. "%") end,
-                                function(v) config.line_spacing_override = v; Config:save(config) end,
-                                function() self:showSettingsDialog(config, Config, on_refresh, on_panel_resize) end,
-                                3)
-                        end,
-                    },
-                },
-                {
-                    {
-                        text = "Paragraph indent: " .. tostring(config.paragraph_indent_chars or 0) .. " ch",
-                        callback = function()
-                            UIManager:close(dialog)
-                            self:showSimpleIntPicker("Paragraph indent (spaces)",
-                                INDENT_CHARS, config.paragraph_indent_chars or 0,
-                                function(v) return v == 0 and "off" or (tostring(v) .. " sp") end,
-                                function(v) config.paragraph_indent_chars = v; Config:save(config) end,
-                                function() self:showSettingsDialog(config, Config, on_refresh, on_panel_resize) end,
-                                3)
-                        end,
-                    },
-                },
-                {
-                    {
-                        text = "Panel size: " .. self:getPanelSizeName(config.panel_height_ratio),
-                        callback = function()
-                            UIManager:close(dialog)
-                            self:showPanelSizePicker(
-                                config.panel_height_ratio,
-                                function(ratio)
-                                    config.panel_height_ratio = ratio
-                                    Config:save(config)
-                                    if on_panel_resize then
-                                        on_panel_resize(ratio)
-                                    end
-                                end,
-                                function()
-                                    self:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
-                                end
-                            )
-                        end,
-                    },
-                },
-                {
-                    {
-                        text = "Close",
-                        callback = function()
-                            UIManager:close(dialog)
-                            self.current_dialog = nil
-                            
-                        end,
-                    },
-                },
+                header("Translation"),
+                { btn_source,       btn_target       },
+                { btn_backend,      btn_auto         },
+                { btn_formatting,   btn_panel        },
+                header("AI"),
+                { btn_ai_model,     btn_ai_key       },
+                { btn_ai_url                          },
+                header("Typography"),
+                { btn_font,         btn_font_size    },
+                { btn_line_spacing, btn_indent       },
+                { btn_close },
             },
         }
         self.current_dialog = dialog

@@ -18,6 +18,7 @@ local Cache = require("rosetta_cache")
 local Extract = require("rosetta_extract")
 local HtmlBoxWidget = require("ui/widget/htmlboxwidget")
 local Layout = require("rosetta_layout")
+local Aligned = require("rosetta_aligned")
 local UI = require("ui_rosetta")
 
 local rosetta = InputContainer:extend{
@@ -338,6 +339,24 @@ function rosetta:_translatePageAI(page, on_done, is_prefetch)
     if not current or #current == 0 then
         if on_done then on_done(nil, "no text") end
         return
+    end
+
+    -- Anchor pass: if a paraligilo file exists in the book's .sdr/ and covers
+    -- every paragraph on this page, skip the AI call entirely.
+    local book_file = self.ui and self.ui.document and self.ui.document.file
+    if book_file then
+        local aligned, hits, misses = Aligned:lookupBlock(book_file, current,
+            self.config.anchor_min_confidence)
+        if aligned and hits > 0 and misses == 0 then
+            logger.info("rosetta: page", page, "fully covered by anchors (", hits, "paragraphs)")
+            if on_done then
+                on_done(aligned, nil, self:_isPageStartContinuationFromSource(page))
+            end
+            return
+        elseif aligned and hits > 0 then
+            logger.info("rosetta: page", page, "partial anchor coverage", hits, "/", hits + misses,
+                "— falling back to AI for misses (not yet implemented, doing full AI)")
+        end
     end
 
     local book_key, lang, model = self:_aiKey()
