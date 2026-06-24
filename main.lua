@@ -72,21 +72,39 @@ function rosetta:getBookKey()
     return nil
 end
 
+function rosetta:_settings()
+    local LuaSettings = require("luasettings")
+    local DataStorage = require("datastorage")
+    return LuaSettings:open(DataStorage:getSettingsDir() .. "/rosetta.lua")
+end
+
+-- Tri-state per-book toggle:
+--   explicit true  -> always on
+--   explicit false -> always off (user opted out)
+--   nil (never touched) -> AUTO: on iff <book>.sdr/rosetta-aligned.json exists
 function rosetta:isEnabledForBook()
     local key = self:getBookKey()
     if not key then return false end
-    local LuaSettings = require("luasettings")
-    local DataStorage = require("datastorage")
-    local s = LuaSettings:open(DataStorage:getSettingsDir() .. "/rosetta.lua")
-    return s:isTrue(key)
+    local s = self:_settings()
+    local stored = s:readSetting(key)
+    if stored == true then return true end
+    if stored == false then return false end
+    -- nil — auto-detect anchor file presence
+    if self.ui and self.ui.document and self.ui.document.file then
+        local Aligned = require("rosetta_aligned")
+        local path = Aligned:_existingPathFor(self.ui.document.file)
+        if path then
+            logger.info("rosetta: auto-enabled via anchor file at", path)
+            return true
+        end
+    end
+    return false
 end
 
 function rosetta:setEnabledForBook(enabled)
     local key = self:getBookKey()
     if not key then return end
-    local LuaSettings = require("luasettings")
-    local DataStorage = require("datastorage")
-    local s = LuaSettings:open(DataStorage:getSettingsDir() .. "/rosetta.lua")
+    local s = self:_settings()
     s:saveSetting(key, enabled)
     s:flush()
     logger.info("rosetta: book enabled state saved:", enabled, "key:", key)
@@ -1068,7 +1086,7 @@ end
 
 function rosetta:addToMainMenu(menu_items)
     menu_items.rosetta = {
-        text = "Rosetta - bilingual view",
+        text = "Rosetta — bilingual reader",
         sorting_hint = "typeset",
         sub_item_table = {
             {

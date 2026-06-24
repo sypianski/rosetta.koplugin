@@ -387,7 +387,11 @@ function UI:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
         end
         local function anchor_path()
             local f = book_file()
-            return f ~= "" and (f .. ".sdr/rosetta-aligned.json") or nil
+            if f == "" then return nil end
+            local Aligned = require("rosetta_aligned")
+            -- Return whichever convention actually has the file; fall back to
+            -- the with-extension form for messaging when neither exists.
+            return Aligned:_existingPathFor(f) or (f .. ".sdr/rosetta-aligned.json")
         end
         local function file_exists(p)
             local fh = p and io.open(p, "rb"); if not fh then return false end
@@ -412,13 +416,19 @@ function UI:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
                     UIManager:show(InfoMessage:new{ text = "No book open." })
                     reopen(); return
                 end
-                local sdr = orig .. ".sdr"
+                -- Try both <file>.sdr and <file-without-ext>.sdr conventions.
+                local sdr_with_ext = orig .. ".sdr"
+                local sdr_stripped = orig:gsub("%.[^./]+$", "") .. ".sdr"
+                local sdr = file_exists(sdr_stripped .. "/rosetta-aligned.json")
+                          and sdr_stripped or sdr_with_ext
                 local notes = {}
 
                 -- 1. anchor JSON / Lua already in .sdr/
                 local anchor_candidates = {
-                    sdr .. "/rosetta-aligned.json",
-                    sdr .. "/rosetta-aligned.lua",
+                    sdr_with_ext .. "/rosetta-aligned.json",
+                    sdr_with_ext .. "/rosetta-aligned.lua",
+                    sdr_stripped .. "/rosetta-aligned.json",
+                    sdr_stripped .. "/rosetta-aligned.lua",
                 }
                 local anchor_found
                 for _, p in ipairs(anchor_candidates) do

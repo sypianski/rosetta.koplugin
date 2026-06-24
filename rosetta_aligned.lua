@@ -28,11 +28,31 @@ local function normalize(text)
     return text
 end
 
+function Aligned:_pathsFor(book_file)
+    -- KOReader writes the sidecar dir under one of two conventions
+    -- depending on the document_sidecar_dir setting:
+    --   1. "<book_file>.sdr"     (file-name plus literal ".sdr" — newer default)
+    --   2. "<book_basename>.sdr" (strip the final extension first — classic layout)
+    -- Yield both so callers can probe either.
+    if not book_file then return {} end
+    local with_ext = book_file .. ".sdr/rosetta-aligned.json"
+    local stripped = book_file:gsub("%.[^./]+$", "") .. ".sdr/rosetta-aligned.json"
+    if stripped == with_ext then return { with_ext } end
+    return { with_ext, stripped }
+end
+
 function Aligned:_pathFor(book_file)
-    if not book_file then return nil end
-    local sdr = book_file .. ".sdr"
-    -- KOReader actually uses "<basename>.sdr" co-located with the file
-    return sdr .. "/rosetta-aligned.json"
+    -- back-compat: return the first candidate (used for diagnostics only)
+    local paths = self:_pathsFor(book_file)
+    return paths[1]
+end
+
+function Aligned:_existingPathFor(book_file)
+    for _, p in ipairs(self:_pathsFor(book_file)) do
+        local f = io.open(p, "r")
+        if f then f:close(); return p end
+    end
+    return nil
 end
 
 -- ---------------------------------------------------------------------------
@@ -46,7 +66,11 @@ function Aligned:loadForBook(book_file)
     self._cache = self._cache or {}
     if self._cache[book_file] ~= nil then return self._cache[book_file] end
 
-    local path = self:_pathFor(book_file)
+    local path = self:_existingPathFor(book_file)
+    if not path then
+        self._cache[book_file] = false
+        return nil
+    end
     local f = io.open(path, "rb")
     if not f then
         self._cache[book_file] = false
