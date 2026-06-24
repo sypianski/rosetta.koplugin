@@ -19,7 +19,7 @@ local defaults = {
     font_override = "",        -- "" = follow book; else crengine face name
     formatting_mode = "plain", -- always plain; HTML mode removed (MuPDF render lost crengine fonts)
     clear_cache_on_start = false, -- diagnostic: nuke translation cache every restart
-    backend = "google",  -- "google" | "ai"
+    backend = "google",  -- "google" | "ai" | "aligned" (paraligilo anchor file only)
     ai_api_key = "",
     ai_base_url = "https://openrouter.ai/api/v1/chat/completions",
     ai_model = "google/gemini-2.5-flash",

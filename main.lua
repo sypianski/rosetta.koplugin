@@ -95,6 +95,16 @@ function rosetta:isEnabledForBook()
         local path = Aligned:_existingPathFor(self.ui.document.file)
         if path then
             logger.info("rosetta: auto-enabled via anchor file at", path)
+            -- Auto-switch backend to 'aligned' so the panel reads from the
+            -- EPUB-derived JSON instead of going out to Google / AI.
+            -- Only flip if the user hasn't explicitly chosen a backend
+            -- (i.e. config is still on its default "google").
+            if self.config and self.config.backend == "google" then
+                self.config.backend = "aligned"
+                local Config = require("rosetta_config")
+                if Config.save then Config:save(self.config) end
+                logger.info("rosetta: backend auto-switched to 'aligned'")
+            end
             return true
         end
     end
@@ -194,6 +204,10 @@ function rosetta:translateCurrentPage()
         self.panel_text = "No text found."
         self:refreshPanel()
         return
+    end
+
+    if self.config.backend == "aligned" then
+        return self:translateCurrentPageAligned(current_page, current)
     end
 
     if self.config.backend == "ai" then
@@ -337,6 +351,30 @@ function rosetta:translateCurrentPage()
         end
     end
 
+    self:refreshPanel()
+end
+
+-- Backend: aligned-only. Pure paraligilo anchor lookup, no AI / Google
+-- fallback. Used when the user has chosen the EPUB-translation source.
+function rosetta:translateCurrentPageAligned(page, current)
+    local book_file = self.ui and self.ui.document and self.ui.document.file
+    if not book_file then
+        self.panel_text = "No book open."
+        self:refreshPanel(); return
+    end
+    local aligned, hits, misses = Aligned:lookupBlock(book_file, current,
+        self.config.anchor_min_confidence)
+    if aligned and hits > 0 then
+        if misses > 0 then
+            self.panel_text = aligned ..
+                "\n\n_[" .. misses .. " paragraph(s) without alignment]_"
+        else
+            self.panel_text = aligned
+        end
+    else
+        self.panel_text = "No aligned translation for this page.\n\n" ..
+            "Switch the backend back to Google or AI to fall back to live translation."
+    end
     self:refreshPanel()
 end
 

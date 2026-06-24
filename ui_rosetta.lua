@@ -280,10 +280,13 @@ function UI:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
                     reopen)
             end,
         }
+        local BACKEND_LABELS = { google = "Google", ai = "AI", aligned = "EPUB" }
         local btn_backend = {
-            text = "Backend: " .. ((config.backend == "ai") and "AI" or "Google"),
+            text = "Backend: " .. (BACKEND_LABELS[config.backend] or "Google"),
             callback = function()
-                config.backend = (config.backend == "ai") and "google" or "ai"
+                -- Cycle google -> ai -> aligned -> google
+                local cycle = { google = "ai", ai = "aligned", aligned = "google" }
+                config.backend = cycle[config.backend] or "ai"
                 Config:save(config); UIManager:close(dialog); reopen()
             end,
         }
