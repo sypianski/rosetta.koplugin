@@ -135,7 +135,12 @@ function rosetta:onReaderReady()
     self.panel_text = ""
     self:shrinkReadingArea()
     UIManager:scheduleIn(0.5, function() self:refreshPanel() end)
-    local orig_paintTo = self.view.paintTo
+    -- Stash original paintTo so we can restore it when the user disables
+    -- rosetta for this book (otherwise refreshPanel keeps painting).
+    if not self._orig_view_paintTo then
+        self._orig_view_paintTo = self.view.paintTo
+    end
+    local orig_paintTo = self._orig_view_paintTo
     self.view.paintTo = function(view, bb, x, y)
         orig_paintTo(view, bb, x, y)
         self:refreshPanel()
@@ -1304,9 +1309,25 @@ function rosetta:addToMainMenu(menu_items)
                         self.is_initialized = false  
                         self:onReaderReady()       
                     else
-                        -- disabling — restore viewport
-                        self.view.dimen.h = Screen:getHeight()
-                        self.ui.dimen.h = Screen:getHeight()
+                        -- disabling — restore viewport + paintTo hook
+                        if self._orig_view_paintTo then
+                            self.view.paintTo = self._orig_view_paintTo
+                            self._orig_view_paintTo = nil
+                        end
+                        self.is_initialized = false
+                        local footer_h = self:getFooterHeight()
+                        self.view.dimen.h = Screen:getHeight() - footer_h
+                        self.ui.dimen.h = Screen:getHeight() - footer_h
+                        if self.original_bottom_margin then
+                            local m = self.ui.document:getPageMargins()
+                            self.ui:handleEvent(Event:new("SetPageMargins", {
+                                m.left,
+                                m.top,
+                                m.right,
+                                self.original_bottom_margin,
+                            }))
+                            self.original_bottom_margin = nil
+                        end
                         self.ui:handleEvent(Event:new("SetDimensions", self.ui.dimen))
                         Screen.bb:paintRect(0, Screen:getHeight() - self.panel_height,
                             Screen:getWidth(), self.panel_height, Blitbuffer.COLOR_WHITE)
