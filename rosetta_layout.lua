@@ -66,7 +66,7 @@ local function get_face(face_name, px, bold, italic)
         if cre_ok and cre and cre.getFontFaceFilenameAndFaceIndex then
             local fok, fn, fi = pcall(cre.getFontFaceFilenameAndFaceIndex, face_name, bold or false, italic or false)
             if fok and fn then file, idx = fn, fi end
-            logger.info("rosetta layout: face=", face_name,
+            logger.dbg("rosetta layout: face=", face_name,
                 "bold=", tostring(bold), "italic=", tostring(italic),
                 "→ file=", tostring(fn), "idx=", tostring(fi))
         end
@@ -74,16 +74,16 @@ local function get_face(face_name, px, bold, italic)
     if file then
         local f = Font:getFace(file, px, idx)
         if f then
-            logger.info("rosetta layout: Font:getFace(", file, ",", px, ",", idx, ") OK")
+            logger.dbg("rosetta layout: Font:getFace(", file, ",", px, ",", idx, ") OK")
             return f
         else
-            logger.info("rosetta layout: Font:getFace(", file, ") returned nil — falling back")
+            logger.dbg("rosetta layout: Font:getFace(", file, ") returned nil — falling back")
         end
     end
     if face_name then
         local f = Font:getFace(face_name, px)
         if f then
-            logger.info("rosetta layout: fallback Font:getFace(", face_name, ") OK")
+            logger.dbg("rosetta layout: fallback Font:getFace(", face_name, ") OK")
             return f
         end
     end

@@ -7,6 +7,9 @@ function Translator:isNetworkAvailable()
     return NetworkMgr:isConnected()
 end
 
+-- BLOCKING: performs a synchronous HTTP request (KOReader's ui/translator).
+-- Never call this directly on the UI thread — run it inside
+-- Trapper:dismissableRunInSubprocess (see main.lua:translateCurrentPage).
 function Translator:translate(text, source_lang, target_lang)
     if not text or #text == 0 then
         return nil, "No text to translate"

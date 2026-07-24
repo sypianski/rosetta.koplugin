@@ -1,6 +1,7 @@
 local https = require("ssl.https")
 local ltn12 = require("ltn12")
 local rapidjson = require("rapidjson")
+local socketutil = require("socketutil")
 local logger = require("logger")
 local Trapper = require("ui/trapper")
 local NetworkMgr = require("ui/network/manager")
@@ -85,8 +86,13 @@ local function build_user_prompt_html(current_html, prev_html, next_html, target
     return table.concat(parts, "\n")
 end
 
-local function do_request(url, api_key, payload_str)
+-- Synchronous HTTPS POST.  BLOCKS the calling thread until the response
+-- arrives or socketutil's timeouts fire — callers on the UI thread must
+-- either run this inside Trapper:dismissableRunInSubprocess (interactive
+-- paths) or keep the timeouts short (background prefetch).
+local function do_request(url, api_key, payload_str, timeout, maxtime)
     local response_body = {}
+    socketutil:set_timeout(timeout or 30, maxtime or 60)
     local _r, code, headers, status = https.request{
         url = url,
         method = "POST",
@@ -100,6 +106,7 @@ local function do_request(url, api_key, payload_str)
         source = ltn12.source.string(payload_str),
         sink = ltn12.sink.table(response_body),
     }
+    socketutil:reset_timeout()
     return code, table.concat(response_body), status
 end
 
@@ -129,14 +136,15 @@ function AI:translateHTML(config, current_html, prev_html, next_html, target_lan
     local function run()
         local ok, code, body
         if silent then
-            ok, code, body = pcall(do_request, url, key, payload_str)
+            -- Blocking path (no Trapper) — short timeouts, prefetch only.
+            ok, code, body = pcall(do_request, url, key, payload_str, 10, 30)
             if not ok then on_result(nil, "Network error: " .. tostring(code)); return end
             ok = true
         else
             local trap = TrapWidget:new{ text = _("Translating (AI)…") }
             UIManager:show(trap)
             ok, code, body = Trapper:dismissableRunInSubprocess(function()
-                local c, b = do_request(url, key, payload_str)
+                local c, b = do_request(url, key, payload_str, 45, 120)
                 return c, b
             end, trap)
             UIManager:close(trap)
@@ -190,10 +198,12 @@ function AI:translate(config, current, prev_ctx, next_ctx, target_lang, on_resul
     local function run()
         local ok, code, body
         if silent then
-            -- background prefetch: synchronous HTTP, no popup, no Trapper.
-            -- The request itself yields via socket.http so the UI stays
-            -- responsive enough; we never need user cancellation here.
-            ok, code, body = pcall(do_request, url, key, payload_str)
+            -- Background prefetch: synchronous HTTP, no popup, no Trapper.
+            -- WARNING: this DOES block the UI thread for the duration of the
+            -- request (socket.http does NOT yield to the UI loop) — that's
+            -- why we keep the socketutil timeouts short here and only use
+            -- this path for prefetch, never for interactive translations.
+            ok, code, body = pcall(do_request, url, key, payload_str, 10, 30)
             if not ok then
                 on_result(nil, "Network error: " .. tostring(code))
                 return
@@ -204,7 +214,7 @@ function AI:translate(config, current, prev_ctx, next_ctx, target_lang, on_resul
             local trap = TrapWidget:new{ text = _("Translating (AI)…") }
             UIManager:show(trap)
             ok, code, body = Trapper:dismissableRunInSubprocess(function()
-                local c, b = do_request(url, key, payload_str)
+                local c, b = do_request(url, key, payload_str, 45, 120)
                 return c, b
             end, trap)
             UIManager:close(trap)
@@ -293,65 +303,145 @@ function AI:_parsePipeMarker(text)
 end
 
 -- ---------------------------------------------------------------------------
--- AI:matchAligned — hybrid aligned-mode helper.
+-- AI:matchAligned — aligned-mode AI fill-in (page-boundary locator).
 --
--- Given the source paragraphs on the current page (in order) and a bilingual
--- corpus snippet from the nearby region of the book, ask the model to emit
--- the target-language equivalent of each numbered source paragraph.
---
--- The corpus is the AI's grounding: when content matches an entry it reuses
--- the human translation verbatim; when no entry matches it falls back to its
--- own translation. This lets us serve human translations for the bulk of the
--- page and AI-translate only the residual paragraphs that hash-lookup missed.
---
--- on_result(map, err) — map is { [i] = "target text", ... } keyed by the
--- 1-based index of the source paragraph as it appeared in `src_paragraphs`.
+-- Contract (kept in sync with the call site in
+-- main.lua:translateCurrentPageAligned):
+--   page_text   — STRING: source-language plain text of the current page.
+--   corpus_text — STRING: continuous target-language excerpt from the same
+--                 book (paragraphs joined with "\n\n").  The caller windows
+--                 it (±N paragraphs) around the most likely position; we
+--                 additionally clamp it to MATCH_MAX_CORPUS_CHARS before
+--                 prompting.  Clamping only affects the prompt: quotes the
+--                 model returns are verbatim substrings of the clamped text
+--                 and therefore also of the full corpus_text.
+--   on_result(phr, err):
+--       phr = { first = <string>, last = <string> } — two short VERBATIM
+--         quotes from corpus_text: `first` opens the corpus fragment that
+--         corresponds to the page, `last` closes it.  The caller locates
+--         them with corpus_text:find(phr.first, 1, true) and
+--         corpus_text:find(phr.last, s, true) and slices between them.
+--       phr = nil, err = nil — model reported "no match"; caller falls back
+--         to the hash-only render.
+--       phr = nil, err = <string> — transport/parse error; same fallback.
+--   silent — true: synchronous request with short timeouts (blocks UI
+--         briefly; only for background use).  false: runs inside
+--         Trapper:dismissableRunInSubprocess with a dismissable TrapWidget
+--         (tap to cancel → on_result(nil, "Cancelled")).
 -- ---------------------------------------------------------------------------
 local MATCH_SYSTEM_PROMPT = [[
 You are a bilingual page-boundary locator.
 
 You receive:
-  - SOURCE PAGE: the source-language paragraphs that are physically on the current page of the book.
-  - TRANSLATION CORPUS: numbered target-language paragraphs from the same book covering the nearby region.
+  - SOURCE PAGE: the source-language text physically on the current page of a book.
+  - TRANSLATION CORPUS: a continuous target-language excerpt from the same book covering the nearby region.
 
-Find which TRANSLATION CORPUS paragraph corresponds to the FIRST source paragraph and which corresponds to the LAST source paragraph on the page.
+Identify the contiguous fragment of TRANSLATION CORPUS that corresponds to the SOURCE PAGE content.
 
-Constraints:
-  - You do NOT translate anything. You only select two integers.
-  - The two integers must be within the numbered range of the corpus.
-  - first <= last.
-  - If multiple corpus paragraphs cover one source paragraph, pick the widest contiguous range.
-  - If no corpus entry plausibly matches a source paragraph at the page edge, still pick the closest paragraph by position; never refuse to answer.
+Return two short VERBATIM quotes copied character-for-character from TRANSLATION CORPUS:
+  - "first": the first 3-8 words of that fragment (where the page's content begins in the corpus).
+  - "last":  the last 3-8 words of that fragment (where the page's content ends in the corpus).
 
-Output ONLY a single JSON object: {"first": N, "last": M}. No prose before or after.
+Rules:
+  - Copy each quote EXACTLY as it appears in TRANSLATION CORPUS — same characters, same punctuation, same case. Do not translate, do not paraphrase, do not normalise quotes or dashes.
+  - "first" must occur in the corpus at or before the position of "last".
+  - If no part of the corpus corresponds to the source page, return {"first": "", "last": ""}.
+
+Output ONLY a single JSON object: {"first": "...", "last": "..."}. No prose before or after.
 ]]
 
--- Returns on_result({first=N, last=M}, err) — 1-based corpus indices.
-function AI:matchAligned(config, src_paragraphs, corpus, target_lang, on_result, silent)
+local MATCH_MAX_CORPUS_CHARS = 24000
+local MATCH_MAX_PAGE_CHARS   = 6000
+
+-- Clamp the corpus excerpt for the prompt.  Keeps the MIDDLE of the text
+-- (the caller centres its paragraph window on the last known anchor), and
+-- snaps both cut points inward to paragraph boundaries ("\n\n") so the model
+-- only ever sees whole paragraphs.  The result is always a verbatim
+-- substring of `corpus`.
+function AI:_clampCorpusForMatch(corpus, max_chars)
+    max_chars = max_chars or MATCH_MAX_CORPUS_CHARS
+    if #corpus <= max_chars then return corpus end
+    local excess = #corpus - max_chars
+    local s = 1 + math.floor(excess / 2)
+    local e = s + max_chars - 1
+    -- snap start forward to the next paragraph boundary
+    local ps = corpus:find("\n\n", s, true)
+    if ps and ps + 2 <= e then s = ps + 2 end
+    -- snap end backward to the last paragraph boundary within [s, e]
+    local last_sep
+    local from = s
+    while true do
+        local f = corpus:find("\n\n", from, true)
+        if not f or f > e then break end
+        last_sep = f
+        from = f + 1
+    end
+    if last_sep and last_sep > s then e = last_sep - 1 end
+    return corpus:sub(s, e)
+end
+
+-- Clamp the page text for the prompt.  The page EDGES are what define the
+-- first/last quotes, so keep head + tail and elide the middle.
+function AI:_clampPageForMatch(page_text, max_chars)
+    max_chars = max_chars or MATCH_MAX_PAGE_CHARS
+    if #page_text <= max_chars then return page_text end
+    local half = math.floor((max_chars - 7) / 2)  -- 7 = #"\n[…]\n"
+    return page_text:sub(1, half) .. "\n[…]\n" .. page_text:sub(-half)
+end
+
+-- Parse the raw HTTP response body of a matchAligned request.
+-- Returns (phr, nil) on success, (nil, nil) when the model reports no
+-- match (empty strings), (nil, err) on any transport/format problem.
+function AI:_parseMatchResponse(body)
+    local pok, parsed = pcall(rapidjson.decode, body, { null = nil })
+    if not pok or type(parsed) ~= "table" then
+        return nil, "Invalid JSON response"
+    end
+    if parsed.error then
+        return nil, "API error: " .. tostring(parsed.error.message or parsed.error)
+    end
+    local choice = parsed.choices and parsed.choices[1]
+    local text = choice and choice.message and choice.message.content
+    if type(text) ~= "string" or text == "" then
+        return nil, "Empty response"
+    end
+    -- Strip code fences just in case.
+    text = text:gsub("^%s*```%w*%s*", ""):gsub("%s*```%s*$", "")
+    local mok, mapped = pcall(rapidjson.decode, text, { null = nil })
+    if not mok or type(mapped) ~= "table" then
+        return nil, "Bad JSON from model: " .. text:sub(1, 200)
+    end
+    local first, last = mapped.first, mapped.last
+    if type(first) ~= "string" or type(last) ~= "string" then
+        return nil, "Bad phrase pair from model: " .. text:sub(1, 200)
+    end
+    first = first:gsub("^%s+", ""):gsub("%s+$", "")
+    last  = last:gsub("^%s+", ""):gsub("%s+$", "")
+    if first == "" or last == "" then
+        return nil  -- explicit "no match" from the model — not an error
+    end
+    return { first = first, last = last }
+end
+
+function AI:matchAligned(config, page_text, corpus_text, target_lang, on_result, silent)
     if not self:isConfigured(config) then
         on_result(nil, "No AI API key configured.")
         return
     end
-    if not src_paragraphs or #src_paragraphs == 0 or not corpus or #corpus == 0 then
+    if type(page_text) ~= "string" or page_text == ""
+       or type(corpus_text) ~= "string" or corpus_text == "" then
         on_result(nil); return
     end
-    -- Build user prompt.
-    local parts = {}
-    table.insert(parts, "SOURCE PAGE (paragraphs in order):")
-    for i, p in ipairs(src_paragraphs) do
-        table.insert(parts, string.format("%d) %s", i, p))
-    end
-    table.insert(parts, "")
-    table.insert(parts, "TRANSLATION CORPUS (numbered " ..
-        tostring(target_lang or "??") .. " paragraphs):")
-    for j, entry in ipairs(corpus) do
-        table.insert(parts, string.format("[%d] %s", j, entry.tgt or ""))
-    end
-    table.insert(parts, "")
-    table.insert(parts,
-        "Select the corpus indices for the FIRST and LAST source paragraph.")
-    table.insert(parts, "Output ONLY: {\"first\": N, \"last\": M}")
-    local user_prompt = table.concat(parts, "\n")
+    local user_prompt = table.concat({
+        "SOURCE PAGE (source language):",
+        self:_clampPageForMatch(page_text),
+        "",
+        "TRANSLATION CORPUS (" .. tostring(target_lang or "??") .. "):",
+        self:_clampCorpusForMatch(corpus_text),
+        "",
+        "Return the two verbatim corpus quotes bracketing the fragment that corresponds to the SOURCE PAGE.",
+        'Output ONLY: {"first": "...", "last": "..."}',
+    }, "\n")
 
     local url = config.ai_base_url or "https://openrouter.ai/api/v1/chat/completions"
     local model = config.ai_model or "google/gemini-2.5-flash"
@@ -363,38 +453,37 @@ function AI:matchAligned(config, src_paragraphs, corpus, target_lang, on_result,
             { role = "user",   content = user_prompt },
         },
         temperature = 0.1,
-        max_tokens = config.ai_max_tokens or 4096,
+        max_tokens = 1024,  -- response is two short quotes
         response_format = { type = "json_object" },
     }
     local payload_str = rapidjson.encode(payload)
 
-    local function run()
-        local ok, code, body = pcall(do_request, url, key, payload_str)
-        if not ok then on_result(nil, "Network error: " .. tostring(code)); return end
+    local function handle(code, body)
         if not code or code ~= 200 then
             on_result(nil, "HTTP " .. tostring(code) .. ": " .. tostring(body):sub(1, 200))
             return
         end
-        local pok, parsed = pcall(rapidjson.decode, body, { null = nil })
-        if not pok or not parsed then on_result(nil, "Invalid JSON response"); return end
-        if parsed.error then
-            on_result(nil, "API error: " .. tostring(parsed.error.message or parsed.error)); return
+        local phr, perr = self:_parseMatchResponse(body)
+        on_result(phr, perr)
+    end
+
+    local function run()
+        if silent then
+            -- Blocking path — short timeouts only.
+            local ok, code, body = pcall(do_request, url, key, payload_str, 10, 30)
+            if not ok then on_result(nil, "Network error: " .. tostring(code)); return end
+            handle(code, body)
+        else
+            local trap = TrapWidget:new{ text = _("Matching translation (AI)…") }
+            UIManager:show(trap)
+            local completed, code, body = Trapper:dismissableRunInSubprocess(function()
+                local c, b = do_request(url, key, payload_str, 45, 120)
+                return c, b
+            end, trap)
+            UIManager:close(trap)
+            if not completed then on_result(nil, "Cancelled"); return end
+            handle(code, body)
         end
-        local choice = parsed.choices and parsed.choices[1]
-        local text = choice and choice.message and choice.message.content
-        if not text or text == "" then on_result(nil, "Empty response"); return end
-        -- Strip code fences just in case.
-        text = text:gsub("^%s*```%w*%s*", ""):gsub("%s*```%s*$", "")
-        local mok, mapped = pcall(rapidjson.decode, text, { null = nil })
-        if not mok or type(mapped) ~= "table" then
-            on_result(nil, "Bad JSON from model: " .. text:sub(1, 200)); return
-        end
-        local first = tonumber(mapped.first or mapped["1"])
-        local last  = tonumber(mapped.last  or mapped["2"])
-        if not first or not last or first > last then
-            on_result(nil, "Invalid range from model: " .. text:sub(1, 200)); return
-        end
-        on_result({ first = first, last = last })
     end
 
     if silent then
