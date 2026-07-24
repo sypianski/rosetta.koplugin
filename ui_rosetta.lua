@@ -3,6 +3,16 @@ local ButtonDialogTitle = require("ui/widget/buttondialogtitle")
 local InputDialog = require("ui/widget/inputdialog")
 local Device = require("device")
 local logger = require("logger")
+local lfs = require("libs/libkoreader-lfs")
+local util = require("util")
+
+-- Quote a string for a POSIX shell: wrap in single quotes, escaping embedded
+-- single quotes as '\''.  NOTE: Lua's string.format("%q") is NOT shell-safe —
+-- it produces double quotes, inside which the shell still expands $(…),
+-- `…` and $vars (and book filenames are external data).
+local function shquote(s)
+    return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
+end
 
 local LANGUAGES = {
     { code = "auto", name = "Auto detect" },
@@ -256,6 +266,9 @@ function UI:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
 
         -- Local helpers to build entries
         local function reopen()
+            -- any interaction may have changed config → repaint panel on the
+            -- next paint after the dialog stack finally closes
+            if self._mark_dirty_fn then self._mark_dirty_fn() end
             self:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
         end
         local function header(text)
@@ -470,26 +483,30 @@ function UI:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
                             local wfh = io.open(pair_p, "wb")
                             if wfh then wfh:write(tgt); wfh:close()
                                 table.insert(notes, "pair: from anchor → " .. tgt)
+                                -- Record the freshly written pair so the
+                                -- sibling scan below sees it and doesn't
+                                -- clobber rosetta-paired.txt.
+                                pair_now = tgt
                             end
                         end
                     end
                 end
                 if not pair_now or pair_now == "" or not file_exists(pair_now or "") then
-                    -- scan siblings
-                    local dir, fname = orig:match("^(.*)/([^/]+)$")
-                    dir = dir or "."
-                    local base = (fname or ""):gsub("%.epub$", "")
-                    local cmd = string.format("ls -1 %q/*.epub 2>/dev/null", dir)
-                    local p = io.popen(cmd, "r")
+                    -- scan siblings (no shell — book paths are external data)
+                    local dir = orig:match("^(.*)/[^/]+$") or "."
                     local found_siblings = {}
-                    if p then
-                        for line in p:lines() do
-                            if line ~= orig and line:lower():match("%.epub$") then
-                                table.insert(found_siblings, line)
+                    local ok_iter, iter, dir_obj = pcall(lfs.dir, dir)
+                    if ok_iter then
+                        for entry in iter, dir_obj do
+                            if entry:lower():match("%.epub$") then
+                                local full = dir .. "/" .. entry
+                                if full ~= orig then
+                                    table.insert(found_siblings, full)
+                                end
                             end
                         end
-                        p:close()
                     end
+                    table.sort(found_siblings)
                     if #found_siblings == 1 then
                         local wfh = io.open(pair_p, "wb")
                         if wfh then wfh:write(found_siblings[1]); wfh:close()
@@ -528,7 +545,7 @@ function UI:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
                         return filename:lower():match("%.epub$") ~= nil
                     end,
                     onConfirm = function(src)
-                        os.execute(string.format("mkdir -p %q", p:match("^(.*)/[^/]+$") or "."))
+                        util.makePath(p:match("^(.*)/[^/]+$") or ".")
                         local fh = io.open(p, "wb")
                         if not fh then
                             UIManager:show(InfoMessage:new{ text = "Cannot write: " .. p })
@@ -598,7 +615,7 @@ function UI:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
                             reopen(); return
                         end
                         local body = sfh:read("*a"); sfh:close()
-                        os.execute(string.format("mkdir -p %q", p:match("^(.*)/[^/]+$") or "."))
+                        util.makePath(p:match("^(.*)/[^/]+$") or ".")
                         local dfh = io.open(p, "wb")
                         if not dfh then
                             UIManager:show(InfoMessage:new{ text = "Cannot write: " .. p })
@@ -647,9 +664,9 @@ function UI:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
                     local slug = orig:match("([^/]+)%.epub$") or "rosetta_pair"
                     slug = slug:gsub("[^%w]+", "_")
                     local workdir = "/tmp/rosetta-paraligilo-" .. slug
-                    os.execute(string.format("mkdir -p %q", workdir))
+                    util.makePath(workdir)
                     local out_json = orig .. ".sdr/parallel-aligned.json"
-                    os.execute(string.format("mkdir -p %q", orig .. ".sdr"))
+                    util.makePath(orig .. ".sdr")
 
                     local Trapper = require("ui/trapper")
                     local TrapWidget = require("ui/widget/trapwidget")
@@ -658,9 +675,13 @@ function UI:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
                     }
                     UIManager:show(trap)
                     Trapper:wrap(function()
+                        -- shquote (single-quote) every externally influenced
+                        -- path; slug is sanitised to [%w_] above and
+                        -- mode_args/mode_label are literals from this file.
                         local cmd1 = string.format(
-                            "cd %q && %q %q %q --name %s --workdir %q %s 2>&1",
-                            par_home, run_py, orig, trans, slug, workdir, mode_args)
+                            "cd %s && %s %s %s --name %s --workdir %s %s 2>&1",
+                            shquote(par_home), shquote(run_py), shquote(orig),
+                            shquote(trans), slug, shquote(workdir), mode_args)
                         local ok1 = Trapper:dismissableRunInSubprocess(function()
                             local p = io.popen(cmd1, "r")
                             local out = p:read("*a"); local _, _, rc = p:close()
@@ -672,13 +693,14 @@ function UI:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
                             reopen(); return
                         end
                         local cmd2 = string.format(
-                            "%q --orig-jsonl %q --trans-jsonl %q --align %q "
-                            .. "--src-file %q --tgt-file %q --method %s -o %q 2>&1",
-                            emit_py,
-                            workdir .. "/" .. slug .. "_orig.jsonl",
-                            workdir .. "/" .. slug .. "_trans.jsonl",
-                            workdir .. "/" .. slug .. "_final.jsonl",
-                            orig, trans, mode_label, out_json)
+                            "%s --orig-jsonl %s --trans-jsonl %s --align %s "
+                            .. "--src-file %s --tgt-file %s --method %s -o %s 2>&1",
+                            shquote(emit_py),
+                            shquote(workdir .. "/" .. slug .. "_orig.jsonl"),
+                            shquote(workdir .. "/" .. slug .. "_trans.jsonl"),
+                            shquote(workdir .. "/" .. slug .. "_final.jsonl"),
+                            shquote(orig), shquote(trans), mode_label,
+                            shquote(out_json))
                         local ok2 = Trapper:dismissableRunInSubprocess(function()
                             local p = io.popen(cmd2, "r")
                             local out = p:read("*a"); local _, _, rc = p:close()
@@ -721,7 +743,18 @@ function UI:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
         local btn_close = {
             text = "Close",
             callback = function()
+                if self._mark_dirty_fn then self._mark_dirty_fn() end
                 UIManager:close(dialog); self.current_dialog = nil
+            end,
+        }
+
+        local btn_toggle = {
+            text = (self._is_enabled_fn and self._is_enabled_fn())
+                and "Disable for this book"
+                or  "Enable for this book",
+            callback = function()
+                UIManager:close(dialog); self.current_dialog = nil
+                if self._toggle_enabled_fn then self._toggle_enabled_fn() end
             end,
         }
 
@@ -733,6 +766,7 @@ function UI:showSettingsDialog(config, Config, on_refresh, on_panel_resize)
             title = "rosetta",
             buttons = {
                 hdr_translation,
+                { btn_toggle },
                 { btn_source,         btn_target          },
                 { btn_backend,        btn_auto            },
                 { btn_ai_model,       btn_ai_key          },

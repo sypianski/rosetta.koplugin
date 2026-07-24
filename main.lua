@@ -3,13 +3,10 @@ local UIManager = require("ui/uimanager")
 local logger = require("logger")
 local TextBoxWidget = require("ui/widget/textboxwidget")
 local TextWidget = require("ui/widget/textwidget")
-local FrameContainer = require("ui/widget/container/framecontainer")
 local Blitbuffer = require("ffi/blitbuffer")
 local Font = require("ui/font")
 local Screen = require("device").screen
 local Event = require("ui/event")
-local GestureRange = require("ui/gesturerange")
-local Geom = require("ui/geometry")
 
 local Config = require("rosetta_config")
 local Translator = require("rosetta_translator")
@@ -134,6 +131,7 @@ function rosetta:onReaderReady()
     logger.info("rosetta: initializing...")
     self.panel_text = ""
     self:shrinkReadingArea()
+    self._panel_dirty = true
     UIManager:scheduleIn(0.5, function() self:refreshPanel() end)
     -- Stash original paintTo so we can restore it when the user disables
     -- rosetta for this book (otherwise refreshPanel keeps painting).
@@ -143,7 +141,14 @@ function rosetta:onReaderReady()
     local orig_paintTo = self._orig_view_paintTo
     self.view.paintTo = function(view, bb, x, y)
         orig_paintTo(view, bb, x, y)
-        self:refreshPanel()
+        -- Repaint the panel only when something actually changed (page turn,
+        -- config change, settings dialog closed).  Unconditional refreshPanel
+        -- here used to do a full relayout + Screen:refreshUI on EVERY paint
+        -- (footer clock ticks, dialog opens, highlights, …).
+        if self._panel_dirty then
+            self._panel_dirty = false
+            self:refreshPanel(true)  -- true: we're inside the paint cycle
+        end
     end
     -- Kick off a translation for the current page immediately so the panel
     -- isn't blank until the user turns a page.
@@ -337,16 +342,33 @@ function rosetta:translateCurrentPage()
     self.panel_text = "Translating..."
     self:refreshPanel()
 
-    local translated, err = Translator:translate(
-        final_text,
-        self.config.source_lang,
-        self.config.target_lang
-    )
-
-    if err then
-        self.panel_text = "Error: " .. err
-    else
-        self.panel_text = translated or "Empty translation."
+    -- Run the (blocking) Google request in a subprocess via Trapper so the
+    -- UI thread stays responsive; the TrapWidget gives the user a visible
+    -- indicator and tap-to-cancel.
+    local req_page = current_page
+    local Trapper = require("ui/trapper")
+    local TrapWidget = require("ui/widget/trapwidget")
+    Trapper:wrap(function()
+        local trap = TrapWidget:new{ text = "Translating…" }
+        UIManager:show(trap)
+        local completed, translated, err = Trapper:dismissableRunInSubprocess(function()
+            local t, e = Translator:translate(
+                final_text,
+                self.config.source_lang,
+                self.config.target_lang
+            )
+            -- avoid nil holes in the serialized return values
+            return t or false, e or false
+        end, trap)
+        UIManager:close(trap)
+        if not completed then
+            -- user tapped to cancel — clear the "Translating..." caption
+            self.panel_text = ""
+            self:refreshPanel()
+            return
+        end
+        translated = translated or nil
+        err = err or nil
         if translated and #translated > 0 then
             local h = Cache:keyFor(current)
             if h then
@@ -354,9 +376,16 @@ function rosetta:translateCurrentPage()
                           self.config.target_lang or "en", "google", translated)
             end
         end
-    end
-
-    self:refreshPanel()
+        -- stale-page guard: don't clobber the panel if the user moved on
+        if self.ui.document:getCurrentPage() ~= req_page then return end
+        if err then
+            self.panel_text = "Error: " .. tostring(err)
+        else
+            self.panel_text = (translated and #translated > 0) and translated
+                or "Empty translation."
+        end
+        self:refreshPanel()
+    end)
 end
 
 -- Backend: aligned-only. Pure paraligilo anchor lookup, no AI / Google
@@ -543,7 +572,7 @@ function rosetta:translateCurrentPageAligned(page, current)
                 break
             end
         end
-    end, true)
+    end, false)  -- non-silent: Trapper subprocess + dismissable trap widget
 end
 
 -- Bump this when the AI prompt changes, to invalidate stale cached translations.
@@ -653,7 +682,10 @@ function rosetta:_translatePageAI(page, on_done, is_prefetch)
             Cache:put(book_key, content_hash, lang, model, flag .. translated)
         end
         if on_done then on_done(translated, err, is_continuation) end
-    end, true)  -- silent=true always; in-panel "Translating…" indicator replaces popup
+    end, is_prefetch == true)
+    -- silent only for prefetch: interactive translations run inside
+    -- Trapper:dismissableRunInSubprocess (dismissable TrapWidget, tap to
+    -- cancel) so they don't freeze the UI thread.
 end
 
 function rosetta:translateCurrentPageAI(current_page, _current)
@@ -724,7 +756,7 @@ function rosetta:_translatePageAIHTML(page, on_done, is_prefetch)
                 Cache:put(book_key, content_hash, lang, model, flag .. translated)
             end
             if on_done then on_done(translated, err, is_continuation) end
-        end, true)
+        end, is_prefetch == true)  -- silent only for prefetch, see _translatePageAI
 end
 
 function rosetta:_prefetchNextAI(page)
@@ -764,28 +796,51 @@ end
 
 function rosetta:onPageUpdate(pageno)
     if not self:isEnabledForBook() then return end
+    self._panel_dirty = true
     if not self.config.auto_translate then return end
     self:_scheduleTranslate(0.5)
 end
 
 function rosetta:onPosUpdate(pos, pageno)
     if not self:isEnabledForBook() then return end
+    self._panel_dirty = true
     if not self.config.auto_translate then return end
     self:_scheduleTranslate(0.5)
 end
 
-function rosetta:getPanelGearRegion()
-    local screen_w = Screen:getWidth()
-    local screen_h = Screen:getHeight()
-    local footer_h = self:getFooterHeight()
-    local icon_size = Screen:scaleByDPI(32)
-    local margin = Screen:scaleByDPI(8)
-    return {
-        x = screen_w - icon_size - margin,
-        y = screen_h - footer_h - icon_size - margin,
-        w = icon_size,
-        h = icon_size,
-    }
+function rosetta:toggleEnabledForBook()
+    local enabled = self:isEnabledForBook()
+    self:setEnabledForBook(not enabled)
+    if not enabled then
+        -- enabling
+        self.is_initialized = false
+        self:onReaderReady()
+    else
+        -- disabling — restore viewport + paintTo hook
+        if self._orig_view_paintTo then
+            self.view.paintTo = self._orig_view_paintTo
+            self._orig_view_paintTo = nil
+        end
+        self.is_initialized = false
+        local footer_h = self:getFooterHeight()
+        self.view.dimen.h = Screen:getHeight() - footer_h
+        self.ui.dimen.h = Screen:getHeight() - footer_h
+        if self.original_bottom_margin then
+            local m = self.ui.document:getPageMargins()
+            self.ui:handleEvent(Event:new("SetPageMargins", {
+                m.left,
+                m.top,
+                m.right,
+                self.original_bottom_margin,
+            }))
+            self.original_bottom_margin = nil
+        end
+        self.ui:handleEvent(Event:new("SetDimensions", self.ui.dimen))
+        Screen.bb:paintRect(0, Screen:getHeight() - self.panel_height,
+            Screen:getWidth(), self.panel_height, Blitbuffer.COLOR_WHITE)
+        Screen:refreshUI(0, Screen:getHeight() - self.panel_height,
+            Screen:getWidth(), self.panel_height)
+    end
 end
 
 function rosetta:showSettingsDialog()
@@ -793,6 +848,11 @@ function rosetta:showSettingsDialog()
         self.config = Config:load()
     end
     UI._book_file = self.ui and self.ui.document and self.ui.document.file or nil
+    UI._is_enabled_fn = function() return self:isEnabledForBook() end
+    UI._toggle_enabled_fn = function() self:toggleEnabledForBook() end
+    -- Settings changes must mark the panel dirty so the paint hook repaints
+    -- it once the dialog closes (the hook only repaints on the dirty flag).
+    UI._mark_dirty_fn = function() self._panel_dirty = true end
     UI:showSettingsDialog(self.config, Config,
         function()
             self:refreshPanel()
@@ -831,18 +891,18 @@ function rosetta:_bookFace()
         size_px = math.floor(Screen:scaleBySize(self.config.font_size or 14) * percent / 100 + 0.5)
     end
     if size_px < 8 then size_px = 8 end
-    logger.info("rosetta: book face name =", tostring(face_name), "size_px =", size_px)
+    logger.dbg("rosetta: book face name =", tostring(face_name), "size_px =", size_px)
     if face_name then
         local cre_ok, cre = pcall(require, "libs/libkoreader-cre")
         if cre_ok and cre and cre.getFontFaceFilenameAndFaceIndex then
             local fok, fn, fi = pcall(cre.getFontFaceFilenameAndFaceIndex, face_name)
-            logger.info("rosetta: cre filename =", tostring(fn), "idx =", tostring(fi), "ok =", tostring(fok))
+            logger.dbg("rosetta: cre filename =", tostring(fn), "idx =", tostring(fi), "ok =", tostring(fok))
             if fok and fn then
                 local face = Font:getFace(fn, size_px, fi)
                 if face then return face, size_px end
             end
         else
-            logger.info("rosetta: cre module not loadable:", tostring(cre))
+            logger.dbg("rosetta: cre module not loadable:", tostring(cre))
         end
         local face = Font:getFace(face_name, size_px)
         if face then return face, size_px end
@@ -870,7 +930,7 @@ function rosetta:_bookLineHeight()
             end
         end)
     end
-    logger.info("rosetta: book line_spacing pct =", tostring(pct))
+    logger.dbg("rosetta: book line_spacing pct =", tostring(pct))
     if not pct or pct < 50 or pct > 300 then pct = 130 end
     -- crengine interline-space-percent = TOTAL line height as % of font height
     -- (100 = no leading).  TextBoxWidget.line_height = EXTRA em on top of
@@ -969,7 +1029,7 @@ function rosetta:_appendManiculeHtml(html)
     return html .. " ☞"
 end
 
-function rosetta:_renderHtmlPanel(panel_y, top_pad, bottom_pad, left_pad, right_pad, screen_w, font_px, _face)
+function rosetta:_renderHtmlPanel(panel_y, top_pad, bottom_pad, left_pad, right_pad, screen_w, font_px, _face, flush)
     local text_w = math.max(50, screen_w - left_pad - right_pad)
     local text_h = math.max(20, self.panel_height - top_pad - bottom_pad)
     local body = self.panel_text
@@ -997,8 +1057,21 @@ function rosetta:_renderHtmlPanel(panel_y, top_pad, bottom_pad, left_pad, right_
         end
         hbw:free()
     end)
-    Screen:refreshUI(0, panel_y, screen_w, self.panel_height)
+    if flush then
+        flush()
+    else
+        Screen:refreshUI(0, panel_y, screen_w, self.panel_height)
+    end
 end
+
+-- UTF-8 punctuation sequences that Lua's %p (ASCII-only) misses.
+-- When these sit at a word edge, cre.getHyphenationForWord silently strips
+-- them from the returned word, destroying the surrounding punctuation.
+local UNI_PUNCT_EDGE = {
+    "\226\128\152", "\226\128\153", "\226\128\156", "\226\128\157",  -- ‘ ’ “ ”
+    "\226\128\147", "\226\128\148", "\226\128\166",                   -- – — …
+    "\194\171", "\194\187",                                            -- « »
+}
 
 function rosetta:_hyphenateText(text)
     -- Inject crengine-computed soft hyphens (U+00AD, UTF-8 0xC2 0xAD) into
@@ -1009,11 +1082,6 @@ function rosetta:_hyphenateText(text)
     local cre_ok, cre = pcall(require, "libs/libkoreader-cre")
     if not cre_ok or not cre or not cre.getHyphenationForWord then return text end
     local cache = self._hyph_cache
-    -- iterate over whitespace-separated tokens, preserving the original
-    -- whitespace exactly.
-    -- Strip leading/trailing punctuation BEFORE passing the word to cre — the
-    -- hyph dictionary returns a clean form and may swallow trailing dots,
-    -- commas, quotes, dashes, etc., destroying the surrounding punctuation.
     local out = text:gsub("(%S+)", function(token)
         if #token < 6 then return token end
         if token:find("[*#]") then return token end
@@ -1021,9 +1089,57 @@ function rosetta:_hyphenateText(text)
         -- paragraph-indent prefixes; cre would otherwise strip them.
         if token:sub(1, 2) == "\194\160" then return token end
         if cache[token] ~= nil then return cache[token] end
-        -- separate prefix punctuation, core word, suffix punctuation
-        local prefix, core, suffix = token:match("^([%p]*)(.-)([%p]*)$")
-        if not core or core == "" or #core < 5 then
+        -- Strip both ASCII (%p) and Unicode punctuation from each edge so
+        -- cre receives a clean core word. cre's dict silently swallows any
+        -- punctuation it doesn't recognise; without this we lose `?"` `—`
+        -- and curly quotes around every long word in the panel.
+        local core = token
+        local prefix, suffix = "", ""
+        local iter = 0
+        while iter < 16 do
+            iter = iter + 1
+            local consumed = false
+            for _, p in ipairs(UNI_PUNCT_EDGE) do
+                if core:sub(-#p) == p then
+                    suffix = p .. suffix
+                    core = core:sub(1, -#p - 1)
+                    consumed = true
+                    break
+                end
+            end
+            if not consumed then
+                local last = core:sub(-1)
+                if last ~= "" and last:match("%p") then
+                    suffix = last .. suffix
+                    core = core:sub(1, -2)
+                    consumed = true
+                end
+            end
+            if not consumed then break end
+        end
+        iter = 0
+        while iter < 16 do
+            iter = iter + 1
+            local consumed = false
+            for _, p in ipairs(UNI_PUNCT_EDGE) do
+                if core:sub(1, #p) == p then
+                    prefix = prefix .. p
+                    core = core:sub(#p + 1)
+                    consumed = true
+                    break
+                end
+            end
+            if not consumed then
+                local first = core:sub(1, 1)
+                if first ~= "" and first:match("%p") then
+                    prefix = prefix .. first
+                    core = core:sub(2)
+                    consumed = true
+                end
+            end
+            if not consumed then break end
+        end
+        if core == "" or #core < 5 then
             cache[token] = token; return token
         end
         local ok, hyph = pcall(cre.getHyphenationForWord, core)
@@ -1031,7 +1147,7 @@ function rosetta:_hyphenateText(text)
             cache[token] = token; return token
         end
         local soft = core:find("%-") and hyph or hyph:gsub("%-", "\194\173")
-        local out_word = (prefix or "") .. soft .. (suffix or "")
+        local out_word = prefix .. soft .. suffix
         cache[token] = out_word
         return out_word
     end)
@@ -1074,19 +1190,39 @@ function rosetta:_currentPageHasText()
     return t:match("%S") ~= nil
 end
 
-function rosetta:refreshPanel()
+-- in_paint = true when called from inside the view.paintTo hook: in that
+-- case we must not emit Screen:refreshUI from within the paint cycle, so the
+-- refresh is deferred to the next UI tick instead.
+function rosetta:refreshPanel(in_paint)
 
     local screen_w = Screen:getWidth()
     local screen_h = Screen:getHeight()
     local footer_h = self:getFooterHeight()
     local panel_y = screen_h - self.panel_height - footer_h
 
+    logger.dbg("rosetta: refreshPanel, in_paint =", in_paint == true)
+
+    -- Emit the e-ink refresh for the panel region.  Direct when called
+    -- outside the paint cycle; deferred via UIManager:nextTick when inside.
+    local function flush()
+        if in_paint then
+            if self._panel_refresh_scheduled then return end
+            self._panel_refresh_scheduled = true
+            UIManager:nextTick(function()
+                self._panel_refresh_scheduled = false
+                Screen:refreshUI(0, panel_y, screen_w, self.panel_height)
+            end)
+        else
+            Screen:refreshUI(0, panel_y, screen_w, self.panel_height)
+        end
+    end
+
     -- On pages without any text (cover, illustration plates, blank pages)
     -- repaint the panel area in white and skip the fleuron + translation,
     -- so the bottom strip looks like a continuation of the blank book area.
     if not self:_currentPageHasText() then
         Screen.bb:paintRect(0, panel_y, screen_w, self.panel_height, Blitbuffer.COLOR_WHITE)
-        Screen:refreshUI(0, panel_y, screen_w, self.panel_height)
+        flush()
         return
     end
 
@@ -1136,12 +1272,12 @@ function rosetta:refreshPanel()
         local cy = panel_y + top_pad + math.floor(font_px * 0.3)
         cap:paintTo(Screen.bb, cx, cy)
         cap:free()
-        Screen:refreshUI(0, panel_y, screen_w, self.panel_height)
+        flush()
         return
     end
 
     if self.config.formatting_mode == "html" and self.panel_text and self.panel_text:match("<%a") then
-        self:_renderHtmlPanel(panel_y, top_pad, bottom_pad, left_pad, right_pad, screen_w, font_px, face)
+        self:_renderHtmlPanel(panel_y, top_pad, bottom_pad, left_pad, right_pad, screen_w, font_px, face, flush)
         return
     end
 
@@ -1286,63 +1422,17 @@ function rosetta:refreshPanel()
         end
     end
 
-    Screen:refreshUI(0, panel_y, screen_w, self.panel_height)
-    logger.info("rosetta: painted at y:", panel_y)
+    flush()
+    logger.dbg("rosetta: painted at y:", panel_y)
 end
 
 function rosetta:addToMainMenu(menu_items)
     menu_items.rosetta = {
         text = "Rosetta — bilingual reader",
         sorting_hint = "typeset",
-        sub_item_table = {
-            {
-                text_func = function()
-                    return self:isEnabledForBook()
-                        and "Disable for this book"
-                        or "Enable for this book"
-                end,
-                callback = function()
-                    local enabled = self:isEnabledForBook()
-                    self:setEnabledForBook(not enabled)
-                    if not enabled then
-                        -- enabling
-                        self.is_initialized = false  
-                        self:onReaderReady()       
-                    else
-                        -- disabling — restore viewport + paintTo hook
-                        if self._orig_view_paintTo then
-                            self.view.paintTo = self._orig_view_paintTo
-                            self._orig_view_paintTo = nil
-                        end
-                        self.is_initialized = false
-                        local footer_h = self:getFooterHeight()
-                        self.view.dimen.h = Screen:getHeight() - footer_h
-                        self.ui.dimen.h = Screen:getHeight() - footer_h
-                        if self.original_bottom_margin then
-                            local m = self.ui.document:getPageMargins()
-                            self.ui:handleEvent(Event:new("SetPageMargins", {
-                                m.left,
-                                m.top,
-                                m.right,
-                                self.original_bottom_margin,
-                            }))
-                            self.original_bottom_margin = nil
-                        end
-                        self.ui:handleEvent(Event:new("SetDimensions", self.ui.dimen))
-                        Screen.bb:paintRect(0, Screen:getHeight() - self.panel_height,
-                            Screen:getWidth(), self.panel_height, Blitbuffer.COLOR_WHITE)
-                        Screen:refreshUI(0, Screen:getHeight() - self.panel_height,
-                            Screen:getWidth(), self.panel_height)
-                    end
-                end,
-            },
-            {
-                text = "Settings",
-                callback = function()
-                    self:showSettingsDialog()
-                end,
-            },
-        },
+        callback = function()
+            self:showSettingsDialog()
+        end,
     }
 end
 
