@@ -43,7 +43,12 @@ function Config:load()
     end
     local result = {}
     for k, v in pairs(defaults) do
-        result[k] = settings:readSetting(k) or v
+        local stored = settings:readSetting(k)
+        if stored == nil then
+            result[k] = v
+        else
+            result[k] = stored
+        end
     end
     return result
 end
